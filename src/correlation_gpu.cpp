@@ -103,10 +103,7 @@ Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int nChann
         throw std::invalid_argument {"NChannelsToAvg is out of range."};
     if(voltages.obsInfo.nTimesteps % voltages.nIntegrationSteps != 0)
         throw std::invalid_argument {"nTimesteps is not an integer multiple of nIntegrationSteps."};
-    if(voltages.on_gpu())
-        throw std::invalid_argument {"Voltages must be allocated on CPU memory. This limitation "
-            "may be removed in the future."};
-    if(!voltages.pinned()) std::cerr << "'cross_correlation_gpu' warning: CPU memory is not pinned."
+    if(!voltages.on_gpu() && !voltages.pinned()) std::cerr << "'cross_correlation_gpu' warning: CPU memory is not pinned."
         "\nThis will result in poor performance." << std::endl;
     
 
@@ -128,13 +125,21 @@ Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int nChann
     const float integrationTime {static_cast<float>(obsInfo.timeResolution * voltages.nIntegrationSteps)};
     
     MemoryBuffer<std::complex<float>> dev_xcorr {outSize, false, true};
-    MemoryBuffer<Complex<int8_t>> dev_voltages {voltages.size(), false, true};
+    MemoryBuffer<Complex<int8_t>> dev_voltages;
+    Complex<int8_t>* dev_voltages_data;
+    
+    if(!voltages.on_gpu()) {
+        dev_voltages.allocate(voltages.size(), false, true);
+        dev_voltages_data = dev_voltages.data();
+    }else{
+        dev_voltages_data = reinterpret_cast<Complex<int8_t>*>(const_cast<std::complex<int8_t>*>(voltages.data()));
+    }
 
     gpuMemset(dev_xcorr.data(), 0, sizeof(Complex<float>) * outSize);
     
 	const int nStreams {5};
     gpuStream_t *streams {new gpuStream_t[nStreams]};
-	for(int i {0}; i < nStreams; i++)
+    for(int i {0}; i < nStreams; i++)
         gpuStreamCreate(streams + i);
     
     // retrieve warp size (32 on NVIDIA, 64 on AMD MI250X)
@@ -146,13 +151,14 @@ Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int nChann
     const int n_blocks {(n_total_warps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK};
 
     for(int i {0}; i < nIntervals; i++){
-        gpuMemcpyAsync(dev_voltages.data() + i*samplesInTimeInterval,
-            voltages.data() + i*samplesInTimeInterval,
-            sizeof(Complex<int8_t>) * samplesInTimeInterval,
-            gpuMemcpyHostToDevice, streams[i % nStreams]);
-  
+        if(!voltages.on_gpu()){
+            gpuMemcpyAsync(dev_voltages.data() + i*samplesInTimeInterval,
+                voltages.data() + i*samplesInTimeInterval,
+                sizeof(Complex<int8_t>) * samplesInTimeInterval,
+                gpuMemcpyHostToDevice, streams[i % nStreams]);
+        }
         cross_correlation_kernel <<< dim3(n_blocks), dim3(n_threads_per_block), 0, streams[i % nStreams] >>> (
-            dev_voltages.data() + i*samplesInTimeInterval, obsInfo, voltages.nIntegrationSteps,
+            dev_voltages_data + i*samplesInTimeInterval, obsInfo, voltages.nIntegrationSteps,
             nChannelsToAvg, reinterpret_cast<Complex<float>*>(dev_xcorr.data()) + i*nValuesInTimeInterval);
     }
     
