@@ -27,12 +27,13 @@ endif()
 
 file(GLOB correlation_sources 
     "src/correlation.cpp"
-    "src/utils.cpp"    
+    "src/utils.cpp"
 )
 
 file(GLOB correlation_headers
     "src/correlation.hpp"
     "src/utils.hpp"
+    "src/correlation.h"
 )
 
 file(GLOB apps "apps/*.cpp")

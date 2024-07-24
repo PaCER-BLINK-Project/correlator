@@ -96,7 +96,7 @@ __global__ void cross_correlation_kernel(const Complex<int8_t> *volt, const Obse
 }
 
 
-// TODO implement averaging in correlation engine
+
 Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int nChannelsToAvg){
     std::cout << "Correlation is happening on GPU.." << std::endl;
     if(nChannelsToAvg < 1 || nChannelsToAvg > voltages.obsInfo.nFrequencies)
@@ -170,3 +170,86 @@ Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int nChann
     return result;
 }
 
+
+
+extern "C" int blink_cross_correlation_gpu(const float* voltages, float* visibilities, 
+        unsigned int n_antennas, unsigned int n_polarisations,
+        unsigned int n_fine_channels, unsigned int n_time_samples, double time_resolution,
+        unsigned int n_integrated_samples, unsigned int n_channels_to_avg, unsigned int reset_buffer){
+    
+    if(n_channels_to_avg < 1 || n_channels_to_avg > n_fine_channels){
+        std::cerr << "'n_channels_to_avg' is out of range." << std::endl;
+        return 1;
+    }
+    if(n_time_samples % n_integrated_samples != 0){
+        std::cerr << "n_time_samples is not an integer multiple of n_integrated_samples." << std::endl;
+        return 1;
+    }
+    if(!voltages){
+        std::cerr << "'voltages' pointer is null." << std::endl;
+        return 1;
+    }
+    if(!visibilities){
+        std::cerr << "'visibilities' pointer is null." << std::endl;
+        return 1;
+    }
+    // TODO add checks to make sure pointers are allocated to GPU memory.
+
+    // values to compute output size and indexing
+    ObservationInfo obsInfo {};
+    obsInfo.nAntennas = n_antennas;
+    obsInfo.nPolarizations = n_polarisations;
+    obsInfo.nTimesteps = n_time_samples;
+    obsInfo.nFrequencies = n_fine_channels;
+    obsInfo.timeResolution = time_resolution;
+
+    const unsigned int n_baselines {(obsInfo.nAntennas + 1) * (obsInfo.nAntennas / 2)};
+    const size_t matrixSize {n_baselines * obsInfo.nPolarizations * obsInfo.nPolarizations};
+    const size_t nIntervals {(obsInfo.nTimesteps + n_integrated_samples - 1) / n_integrated_samples};
+    const size_t nOutFrequencies {obsInfo.nFrequencies / n_channels_to_avg};
+    const size_t nValuesInTimeInterval {matrixSize * nOutFrequencies};
+    const size_t outSize {nValuesInTimeInterval * nIntervals};
+
+    // variables used to compute input index
+    const size_t samplesInPol {n_integrated_samples};
+    const size_t samplesInAntenna {samplesInPol * obsInfo.nPolarizations};
+    const size_t samplesInFrequency {samplesInAntenna * obsInfo.nAntennas};
+    const size_t samplesInTimeInterval {samplesInFrequency * obsInfo.nFrequencies};
+
+    const float integrationTime {static_cast<float>(obsInfo.timeResolution * n_integrated_samples)};
+    
+    Complex<float>* dev_xcorr = reinterpret_cast<Complex<float>*>(visibilities);
+    if(reset_buffer)
+        gpuMemset(dev_xcorr, 0, sizeof(Complex<float>) * outSize);
+    
+	const int nStreams {5};
+    gpuStream_t *streams {new gpuStream_t[nStreams]};
+    for(int i {0}; i < nStreams; i++)
+        gpuStreamCreate(streams + i);
+    
+    // retrieve warp size (32 on NVIDIA, 64 on AMD MI250X)
+    int device_id, warp_size;
+    gpuGetDevice(&device_id);
+    gpuDeviceGetAttribute(&warp_size, gpuDeviceAttributeWarpSize, device_id);
+    const int n_threads_per_block {warp_size * WARPS_PER_BLOCK};
+    const int n_total_warps {static_cast<int>(n_baselines * nOutFrequencies)}; 
+    const int n_blocks {(n_total_warps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK};
+
+    for(int i {0}; i < nIntervals; i++){
+        // if(!voltages.on_gpu()){
+        //     gpuMemcpyAsync(dev_voltages.data() + i*samplesInTimeInterval,
+        //         voltages.data() + i*samplesInTimeInterval,
+        //         sizeof(Complex<int8_t>) * samplesInTimeInterval,
+        //         gpuMemcpyHostToDevice, streams[i % nStreams]);
+        // }
+        cross_correlation_kernel <<< dim3(n_blocks), dim3(n_threads_per_block), 0, streams[i % nStreams] >>> (
+            voltages + i*samplesInTimeInterval, obsInfo, n_integrated_samples,
+            n_channels_to_avg, dev_xcorr + i*nValuesInTimeInterval);
+    }
+    
+    gpuDeviceSynchronize();
+    for(int i {0}; i < nStreams; i++)
+        gpuStreamDestroy(streams[i]);
+    
+    return 0;
+}
