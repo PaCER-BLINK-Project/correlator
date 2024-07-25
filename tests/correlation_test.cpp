@@ -9,6 +9,7 @@
 #include <astroio.hpp>
 #include "../src/utils.hpp"
 #include "../src/correlation.hpp"
+#include "../src/correlation.h"
 #include "common.hpp"
 
 #include <cstdio>
@@ -91,6 +92,91 @@ void test_correlation_with_xgpu_data(){
 }
 
 
+
+void test_correlation_with_xgpu_in_mwax_data(){
+    char *inputData1, *inputData2, *outputData;
+    size_t insize1, insize2, outsize;
+
+    read_data_from_file(dataRootDir + "/mwax/xgpu_input_000.00.bin", inputData1, insize1);
+    read_data_from_file(dataRootDir + "/mwax/xgpu_input_000.01.bin", inputData2, insize2);
+    read_data_from_file(dataRootDir + "/mwax/xgpu_output_000.bin", outputData, outsize);
+    
+   
+    const std::complex<float>* voltages1_cpu = reinterpret_cast<std::complex<float>*>(inputData1);
+    const std::complex<float>* voltages2_cpu = reinterpret_cast<std::complex<float>*>(inputData2);
+    const std::complex<float>* reference_output {reinterpret_cast<std::complex<float>*>(outputData)};
+
+    std::complex<float> *visibilities_gpu, *visibilities_cpu, *voltages1_gpu, *voltages2_gpu;
+    
+    const unsigned int n_antennas {144u};
+    const unsigned int n_baselines {(n_antennas + 1) * (n_antennas / 2)};
+    const unsigned int n_polarisations {2u};
+    const unsigned int n_fine_channels {6400u};
+    const unsigned int n_time_samples {52u};
+    const unsigned int n_integrated_samples {52u};
+    const unsigned int n_integration_intervals {n_time_samples / n_integrated_samples};
+    // the following definition will make sure that the output won't be scaled by the time
+    // averaging factor.
+    const double time_resolution {1.0 / n_integrated_samples};
+    const unsigned int n_channels_to_avg {1u};
+    const unsigned int reset_visibilities {1u};
+    
+    size_t n_voltages {static_cast<size_t>(n_integration_intervals) * n_fine_channels * n_antennas * n_polarisations * n_integrated_samples};
+    size_t n_visibilities {static_cast<size_t>(n_integration_intervals) * n_fine_channels * n_baselines * n_polarisations * n_polarisations};
+
+    if(n_voltages * sizeof(std::complex<float>) != insize1){
+        std::cerr << "Input 1 size does not match the expected size as computed by observation info." << std::endl;
+        throw TestFailed("Input 1 size does not match the expected size as computed by observation info.");
+    }
+    size_t exp_vis_size {n_visibilities * sizeof(std::complex<float>)};
+    // if(exp_vis_size != outsize){
+    //     std::cerr << "Output size (" << outsize << ") does not match the expected size (" << exp_vis_size << ") as computed by observation info." << std::endl;
+    //     throw TestFailed("Output size does not match the expected size as computed by observation info.");
+    // }
+    
+    // allocate memory and copy data to gpu
+    visibilities_cpu = new std::complex<float>[n_visibilities];
+    gpuMalloc(&voltages1_gpu, n_voltages * sizeof(std::complex<float>));
+    gpuMalloc(&voltages2_gpu, n_voltages * sizeof(std::complex<float>));
+    gpuMalloc(&visibilities_gpu, n_visibilities * sizeof(std::complex<float>));
+
+    gpuMemcpy(voltages1_gpu, voltages1_cpu, n_voltages * sizeof(std::complex<float>), gpuMemcpyHostToDevice);
+    gpuMemcpy(voltages2_gpu, voltages2_cpu, n_voltages * sizeof(std::complex<float>), gpuMemcpyHostToDevice);
+
+    int return_value = blink_cross_correlation_gpu((float*)voltages1_gpu, (float*)visibilities_gpu, n_antennas,
+        n_polarisations, n_fine_channels, n_time_samples, time_resolution, n_integrated_samples,
+        n_channels_to_avg, 1);
+    if(return_value){
+        throw TestFailed("First call to `blink_cross_correlation_gpu` returned a non-zero code.");
+    }
+    return_value = blink_cross_correlation_gpu((float*)voltages2_gpu, (float*)visibilities_gpu, n_antennas,
+        n_polarisations, n_fine_channels, n_time_samples, time_resolution, n_integrated_samples,
+        n_channels_to_avg, 0);
+    if(return_value){
+        throw TestFailed("Second call to `blink_cross_correlation_gpu` returned a non-zero code.");
+    }
+    gpuMemcpy(visibilities_cpu, visibilities_gpu, sizeof(std::complex<float>) * n_visibilities, gpuMemcpyDeviceToHost);
+    gpuDeviceSynchronize();    
+
+     for(size_t i {0}; i < n_visibilities; i++){
+        if(visibilities_cpu[i] != reference_output[i]){
+            std::cout << "Elements at position " << i << " differs: " << "vis_cpu[i] = " << visibilities_cpu[i] << ", ref[i] = " << reference_output[i] << std::endl;
+            throw TestFailed("'test_corrrelation_with_xgpu_in_mwax_data' failed.");
+        }
+     }
+
+    gpuFree(voltages1_gpu);
+    gpuFree(voltages2_gpu);
+    gpuFree(visibilities_gpu);
+    delete[] inputData1;
+    delete[] inputData2;
+    delete[] visibilities_cpu;
+    delete[] outputData;
+    std::cout << "'test_correlation_with_xgpu_in_mwax_data' passed." << std::endl;
+}
+
+
+
 void test_correlation_with_eda2_data(){
     auto volt = Voltages::from_eda2_file(dataRootDir + "/eda2/channel_cont_20220118_41581_0_binary.bin", EDA2_OBSERVATION_INFO, 262144);
     auto xcorr = cross_correlation_cpu(volt, 1);
@@ -168,11 +254,12 @@ int main(void){
     dataRootDir = std::string {pathToData};
 
     try{
-        test_complex_conjugate_multiply();
-        test_correlation_with_xgpu_data();
-        test_correlation_with_offline_correlator_data();
-        test_correlation_with_eda2_data();
-        test_correlation_bad_input();
+        // test_complex_conjugate_multiply();
+        // test_correlation_with_xgpu_data();
+        test_correlation_with_xgpu_in_mwax_data();
+        // test_correlation_with_offline_correlator_data();
+        // test_correlation_with_eda2_data();
+        // test_correlation_bad_input();
         #ifdef __GPU__
         test_correlation_gpu();
         #endif

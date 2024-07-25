@@ -36,7 +36,8 @@ So each block handles cross correlation of all baselines in a frequency channel.
 Each thread represents a baseline.
 
 */
-__global__ void cross_correlation_kernel(const Complex<int8_t> *volt, const ObservationInfo obsInfo, unsigned int nIntegrationSteps, 
+template <typename T>
+__global__ void cross_correlation_kernel(const Complex<T> *volt, const ObservationInfo obsInfo, unsigned int nIntegrationSteps, 
         unsigned int nChannelsToAvg, Complex<float> *xcorr){
 
     const unsigned int n_baselines {(obsInfo.nAntennas / 2) * (obsInfo.nAntennas + 1)};
@@ -58,7 +59,7 @@ __global__ void cross_correlation_kernel(const Complex<int8_t> *volt, const Obse
     unsigned int a2 {baseline - ((a1 + 1) * a1)/2};
 
     const double integrationTime {obsInfo.timeResolution * nIntegrationSteps};
-    const Complex<int8_t> *currentChData {volt + samplesInFrequency * out_frequency * nChannelsToAvg};
+    const Complex<T> *currentChData {volt + samplesInFrequency * out_frequency * nChannelsToAvg};
     // for each baseline compute the correlation matrix of its polarization
     for(unsigned int ch {0}; ch < nChannelsToAvg; ch++, currentChData += samplesInFrequency){
         for(unsigned int p1 {0}; p1 < obsInfo.nPolarizations; p1++){
@@ -243,7 +244,7 @@ extern "C" int blink_cross_correlation_gpu(const float* voltages, float* visibil
         //         gpuMemcpyHostToDevice, streams[i % nStreams]);
         // }
         cross_correlation_kernel <<< dim3(n_blocks), dim3(n_threads_per_block), 0, streams[i % nStreams] >>> (
-            voltages + i*samplesInTimeInterval, obsInfo, n_integrated_samples,
+            reinterpret_cast<const Complex<float>*>(voltages) + i*samplesInTimeInterval, obsInfo, n_integrated_samples,
             n_channels_to_avg, dev_xcorr + i*nValuesInTimeInterval);
     }
     
