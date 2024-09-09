@@ -125,7 +125,7 @@ Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int nChann
 
     const float integrationTime {static_cast<float>(obsInfo.timeResolution * voltages.nIntegrationSteps)};
     
-    MemoryBuffer<std::complex<float>> dev_xcorr {outSize, false, true};
+    MemoryBuffer<std::complex<float>> dev_xcorr {outSize, true};
     MemoryBuffer<Complex<int8_t>> dev_voltages;
     Complex<int8_t>* dev_voltages_data;
     

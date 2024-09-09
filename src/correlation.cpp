@@ -42,7 +42,7 @@ Visibilities cross_correlation_cpu(const Voltages& voltages, unsigned int nChann
     const size_t nValuesInTimeInterval {matrixSize * nOutFrequencies};
     const size_t outSize {nValuesInTimeInterval * nIntervals};
 
-    MemoryBuffer<std::complex<float>> xcorr {outSize, false, false};
+    MemoryBuffer<std::complex<float>> xcorr {outSize};
     memset((void*)xcorr.data(), 0, sizeof(std::complex<float>) *outSize);
     // variables used to compute input index
     const size_t samplesInPol {voltages.nIntegrationSteps};
