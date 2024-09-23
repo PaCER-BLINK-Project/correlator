@@ -254,12 +254,12 @@ int main(void){
     dataRootDir = std::string {pathToData};
 
     try{
-        // test_complex_conjugate_multiply();
-        // test_correlation_with_xgpu_data();
-        test_correlation_with_xgpu_in_mwax_data();
-        // test_correlation_with_offline_correlator_data();
-        // test_correlation_with_eda2_data();
-        // test_correlation_bad_input();
+        test_complex_conjugate_multiply();
+        test_correlation_with_xgpu_data();
+        // test_correlation_with_xgpu_in_mwax_data();
+        test_correlation_with_offline_correlator_data();
+        test_correlation_with_eda2_data();
+        test_correlation_bad_input();
         #ifdef __GPU__
         test_correlation_gpu();
         #endif
