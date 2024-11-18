@@ -27,11 +27,11 @@ Visibilities cross_correlation(const Voltages& voltages, unsigned int nChannelsT
  */
 Visibilities cross_correlation_cpu(const Voltages& voltages, unsigned int nChannelsToAvg){
     std::cout << "Correlation is happening on CPU.." << std::endl;
-    if(voltages.on_gpu()) throw std::invalid_argument {"Voltages are allocated in GPU memory."};
+    if(voltages.on_gpu()) throw std::invalid_argument {"cross_correlation_cpu: Voltages are allocated in GPU memory."};
     if(nChannelsToAvg < 1 || nChannelsToAvg > voltages.obsInfo.nFrequencies)
-        throw std::invalid_argument {"NChannelsToAvg is out of range."};
+        throw std::invalid_argument {"cross_correlation_cpu: NChannelsToAvg is out of range."};
     if(voltages.obsInfo.nTimesteps % voltages.nIntegrationSteps != 0)
-        throw std::invalid_argument {"nTimesteps is not an integer multiple of nIntegrationSteps."};
+        throw std::invalid_argument {"cross_correlation_cpu: nTimesteps is not an integer multiple of nIntegrationSteps."};
 
     // values to compute output size and indexing
     const ObservationInfo& obsInfo {voltages.obsInfo};
