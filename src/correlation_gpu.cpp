@@ -130,7 +130,7 @@ Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int nChann
     Complex<int8_t>* dev_voltages_data;
     
     if(!voltages.on_gpu()) {
-        dev_voltages.allocate(voltages.size(), false, true);
+        dev_voltages.allocate(voltages.size(), true);
         dev_voltages_data = dev_voltages.data();
     }else{
         dev_voltages_data = reinterpret_cast<Complex<int8_t>*>(const_cast<std::complex<int8_t>*>(voltages.data()));
