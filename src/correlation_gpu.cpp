@@ -4,7 +4,7 @@
 #include <gpu_macros.hpp>
 #include <astroio.hpp>
 #include <complex>
-#include "mycomplex.hpp"
+#include <mycomplex.hpp>
 
 
 #define WARPS_PER_BLOCK 8
