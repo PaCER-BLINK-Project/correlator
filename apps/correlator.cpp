@@ -22,6 +22,7 @@ struct ProgramOptions {
     unsigned int nChannelsToAvg {1};
     double integrationTime {-1.0}; // No default!
     DataType inputDataType {DataType::MWA};
+    int n_antennas {128};
 };
 
 
@@ -34,9 +35,11 @@ void print_help(std::string exec_name);
 
 Visibilities execute_correlation_on_file(const std::string& filename, const ObservationInfo& obs_info, const ProgramOptions& opts){
     unsigned int nIntegrationSteps {static_cast<unsigned int>(opts.integrationTime / obs_info.timeResolution)};
+    // auto from_dat_file = (num_available_gpus() > 0) ? Voltages::from_dat_file_gpu : Voltages::from_dat_file;
+    auto from_dat_file = Voltages::from_dat_file;
     auto read_voltages = (opts.inputDataType == DataType::MWA) ? \
-            Voltages::from_dat_file : Voltages::from_eda2_file;
-    Voltages volt = read_voltages(filename, obs_info, nIntegrationSteps, num_available_gpus() > 0);
+            from_dat_file : Voltages::from_eda2_file;
+    Voltages volt = read_voltages(filename, obs_info, nIntegrationSteps);
     std::cout << "Correlating voltages in " << filename << ".." << std::endl;
     // Start correlation.
     auto tstart = std::chrono::steady_clock::now();
@@ -77,6 +80,7 @@ int main(int argc, char **argv){
                 // TODO: handle the case of a single DAT file
                 std::string& filename = opts.input_files[0];
                 ObservationInfo obs_info = parse_mwa_phase1_dat_file_info(filename);
+                obs_info.nAntennas = opts.n_antennas;
                 auto xcorr = execute_correlation_on_file(filename, obs_info, opts);
                 if(xcorr.on_gpu()) xcorr.to_cpu();
                 auto output_filename =  get_gpubox_fits_filename(0, xcorr.obsInfo);
@@ -92,6 +96,7 @@ int main(int argc, char **argv){
                     for(auto& dat_file : one_second_data){
                         std::string& input_filename {dat_file.first};
                         ObservationInfo& obs_info {dat_file.second};
+                        obs_info.nAntennas = opts.n_antennas;
                         coarse_channels.push_back(obs_info.coarseChannel);
                         auto xcorr = execute_correlation_on_file(input_filename, obs_info, opts);
                         vis_vector.push_back(std::move(xcorr));
@@ -130,6 +135,7 @@ void print_help(std::string exec_name){
     "\t-t <integration time>: duration of the time interval to integrate over. Accepts a timespec (see below).\n"
     "\t-c <channels to average>: number of contiguous frequency channels to average. Must be >= 1.\n"
     "\t\t Default is 1, that is, no averaging.\n"
+    "\t-a <number of antennas>: number of antennas (or better, stations) used for the observation (default: 128).\n"
     "\t-o <output directory>: path to a directory where to save output files. If the directory does\n"
     "\t\t not exist, it will be created. Default is current directory.\n"
     "\t-i [mwa | eda2]: choose which data type is given in input (default: mwa).\n"
@@ -144,13 +150,18 @@ void print_help(std::string exec_name){
 
 
 void parse_program_options(int argc, char** argv, ProgramOptions& opts){
-    const char *options = "s:t:c:o:i:";
+    const char *options = "s:t:c:o:i:a:";
     int current_opt;
     while((current_opt = getopt(argc, argv, options)) != - 1){
         switch(current_opt){
             case 't': {
                 opts.integrationTime = parse_timespec(optarg);
                 if(opts.integrationTime == 0) throw std::invalid_argument("Non positive integration time specified.");
+                break;
+            }
+            case 'a': {
+                opts.n_antennas = atoi(optarg);
+                if(opts.n_antennas < 1) throw std::invalid_argument("Value for number of antennas must be at least 1.");
                 break;
             }
             case 'o' : {
@@ -192,5 +203,6 @@ void print_program_options(const ProgramOptions& opts){
     std::cout << "\nRunning the correlator program with the following options:\n"
     "\t Integration time interval: " << opts.integrationTime << "s\n"
     "\t Number of channels to average: " << opts.nChannelsToAvg << "\n"
+    "\t Number of antennas: " << opts.n_antennas << "\n"
     "\t Output directory: " << opts.outputDir << "\n" << std::endl;
 }
