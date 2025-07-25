@@ -92,7 +92,7 @@ void test_correlation_with_xgpu_data(){
 }
 
 
-
+#ifdef __GPU__
 void test_correlation_with_xgpu_in_mwax_data(){
     char *inputData1, *inputData2, *outputData;
     size_t insize1, insize2, outsize;
@@ -174,7 +174,7 @@ void test_correlation_with_xgpu_in_mwax_data(){
     delete[] outputData;
     std::cout << "'test_correlation_with_xgpu_in_mwax_data' passed." << std::endl;
 }
-
+#endif
 
 
 void test_correlation_with_eda2_data(){
