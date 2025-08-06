@@ -5,7 +5,7 @@ source "${BASH_UTILS_DIR}/build_utils.sh"
 
 get_commit_hash
 
-PROGRAM_NAME=blink_correlator
+PROGRAM_NAME=blink-correlator
 PROGRAM_VERSION=master #-${COMMIT_HASH:0:7}
 
  
@@ -15,28 +15,29 @@ PROGRAM_VERSION=master #-${COMMIT_HASH:0:7}
 # - "group": install the software in the group wide directory
 # - "user": install the software only for the current user
 # - "test": install the software in the current working directory 
-process_build_script_input group 
+process_build_script_input group
 
+# INSTALL_DIR=/software/projects/director2183/cdipietrantonio/install_fastpipeline/dev
 
 # load all the modules required for the program to compile and run.
 # the following command also adds those module names in the modulefile
 # that this script will generate.
 echo "Loading required modules ..."
 module reset 
-module_load blink_test_data/devel blink_astroio/master rocm/5.7.3
+module_load  blink_test_data/devel  blink-astroio/master rocm/6.4.1
 
 # cmake is only required at build time, so we use the normal module load
-module load cmake/3.27.7
+module load cmake/3.30.5
 # build your software..
 echo "Building the software.."
 
 [ -d build ] || mkdir build
 cd build
-cmake .. -DCMAKE_INSTALL_PREFIX=${INSTALL_DIR} -DCMAKE_CXX_COMPILER=hipcc -DUSE_HIP=ON  -DCMAKE_CXX_FLAGS=--offload-arch=gfx90a -DCMAKE_C_COMPILER=hipcc -DCMAKE_BUILD_TYPE=RelWithDebugInfo
-make VERBOSE=1
+cmake .. -DCMAKE_INSTALL_PREFIX=${INSTALL_DIR} -DCMAKE_CXX_COMPILER=hipcc -DUSE_HIP=ON  -DCMAKE_CXX_FLAGS="--offload-arch=gfx90a -O3" -DCMAKE_C_COMPILER=hipcc -DCMAKE_BUILD_TYPE=Release
+make -j 64  VERBOSE=1
 
 # Install the software
-make test
+# make test
 make install
 
 echo "Creating the modulefile.."
