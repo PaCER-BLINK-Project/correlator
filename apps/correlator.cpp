@@ -92,20 +92,33 @@ int main(int argc, char **argv){
                     // The following vector is compute mapping to write GPUBOX files.
                     std::vector<unsigned int> coarse_channels;
                     std::vector<Visibilities> vis_vector;
-
-                    for(auto& dat_file : one_second_data){
+                    #ifdef __GPU__
+                    int n_gpus;
+                    gpuGetDeviceCount(&n_gpus);
+                    #pragma omp parallel for num_threads(n_gpus)
+                    #endif
+                    for(size_t i = 0; i < one_second_data.size(); i++){
+                        #ifdef __GPU__
+                        gpuSetDevice(i % n_gpus);
+                        #endif
+                        auto& dat_file = one_second_data[i];
                         std::string& input_filename {dat_file.first};
                         ObservationInfo& obs_info {dat_file.second};
                         obs_info.nAntennas = opts.n_antennas;
-                        coarse_channels.push_back(obs_info.coarseChannel);
                         auto xcorr = execute_correlation_on_file(input_filename, obs_info, opts);
-                        vis_vector.push_back(std::move(xcorr));
+                        if(xcorr.on_gpu()) xcorr.to_cpu();
+                        #ifdef __GPU__
+                        #pragma omp critical
+                        #endif
+                        {
+                            coarse_channels.push_back(obs_info.coarseChannel);
+                            vis_vector.push_back(std::move(xcorr));
+                        }
                     }
 
                     // Save to disk
                     auto mapping = build_coarse_channel_to_gpubox_mapping(coarse_channels);
                     for(auto vis : vis_vector){
-                        if(vis.on_gpu()) vis.to_cpu();
                         auto output_filename =  get_gpubox_fits_filename(mapping.at(vis.obsInfo.coarseChannel), vis.obsInfo);
                         output_filename = std::string {opts.outputDir + "/" + output_filename};
                         vis.to_fits_file(output_filename); 
