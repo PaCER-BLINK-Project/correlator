@@ -109,7 +109,7 @@ void test_correlation_with_xgpu_in_mwax_data(){
     std::complex<float> *visibilities_gpu, *visibilities_cpu, *voltages1_gpu, *voltages2_gpu;
     
     const unsigned int n_antennas {144u};
-    const unsigned int n_baselines {(n_antennas + 1) * (n_antennas / 2)};
+    const unsigned int n_baselines {((n_antennas + 1) * n_antennas) / 2};
     const unsigned int n_polarisations {2u};
     const unsigned int n_fine_channels {6400u};
     const unsigned int n_time_samples {52u};
