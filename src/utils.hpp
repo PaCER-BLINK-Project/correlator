@@ -70,4 +70,6 @@ std::string unix_to_utcstr(time_t);
  * @return a string containing the appropriate filename for the visibilities file.
 */
 std::string get_gpubox_fits_filename(unsigned int gpubox_number, const ObservationInfo& obs_info);
+
+std::string get_mwax_fits_filename(const ObservationInfo& obs_info);
 #endif

@@ -140,3 +140,11 @@ std::string get_gpubox_fits_filename(unsigned int gpubox_number, const Observati
     return fits_filename.str();
 }
 
+
+std::string get_mwax_fits_filename(const ObservationInfo& obs_info){
+    std::stringstream fits_filename;
+    fits_filename << obs_info.id << "_" << unix_to_utcstr(obs_info.startTime) << \
+        "_ch" << std::setw(3) << obs_info.coarseChannel <<  std::setw(0) << "_000.fits";
+    return fits_filename.str();
+}
+
