@@ -40,7 +40,7 @@ template <typename T>
 __global__ void cross_correlation_kernel(const Complex<T> *volt, const ObservationInfo obsInfo, unsigned int nIntegrationSteps, 
         unsigned int nChannelsToAvg, Complex<float> *xcorr){
 
-    const unsigned int n_baselines {(obsInfo.nAntennas / 2) * (obsInfo.nAntennas + 1)};
+    const unsigned int n_baselines {(obsInfo.nAntennas * (obsInfo.nAntennas + 1)) / 2};
     const unsigned int n_total_warps { n_baselines * (obsInfo.nFrequencies / nChannelsToAvg)};
     const unsigned int samplesInFrequency {obsInfo.nAntennas * obsInfo.nPolarizations * nIntegrationSteps};
     const size_t matrixSize {n_baselines * obsInfo.nPolarizations * obsInfo.nPolarizations};
@@ -110,7 +110,7 @@ Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int nChann
 
     // values to compute output size and indexing
     const ObservationInfo& obsInfo {voltages.obsInfo};
-    const unsigned int n_baselines {(obsInfo.nAntennas + 1) * (obsInfo.nAntennas / 2)};
+    const unsigned int n_baselines {((obsInfo.nAntennas + 1) * obsInfo.nAntennas) / 2};
     const size_t matrixSize {n_baselines * obsInfo.nPolarizations * obsInfo.nPolarizations};
     const size_t nIntervals {(obsInfo.nTimesteps + voltages.nIntegrationSteps - 1) / voltages.nIntegrationSteps};
     const size_t nOutFrequencies {obsInfo.nFrequencies / nChannelsToAvg};
@@ -204,7 +204,7 @@ extern "C" int blink_cross_correlation_gpu(const float* voltages, float* visibil
     obsInfo.nFrequencies = n_fine_channels;
     obsInfo.timeResolution = time_resolution;
 
-    const unsigned int n_baselines {(obsInfo.nAntennas + 1) * (obsInfo.nAntennas / 2)};
+    const unsigned int n_baselines {((obsInfo.nAntennas + 1) * obsInfo.nAntennas) / 2};
     const size_t matrixSize {n_baselines * obsInfo.nPolarizations * obsInfo.nPolarizations};
     const size_t nIntervals {(obsInfo.nTimesteps + n_integrated_samples - 1) / n_integrated_samples};
     const size_t nOutFrequencies {obsInfo.nFrequencies / n_channels_to_avg};

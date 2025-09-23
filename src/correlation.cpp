@@ -35,7 +35,7 @@ Visibilities cross_correlation_cpu(const Voltages& voltages, unsigned int nChann
 
     // values to compute output size and indexing
     const ObservationInfo& obsInfo {voltages.obsInfo};
-    const unsigned int n_baselines {(obsInfo.nAntennas + 1) * (obsInfo.nAntennas / 2)};
+    const unsigned int n_baselines {((obsInfo.nAntennas + 1) * obsInfo.nAntennas) / 2};
     const size_t matrixSize {n_baselines * obsInfo.nPolarizations * obsInfo.nPolarizations};
     const size_t nIntervals {(obsInfo.nTimesteps + voltages.nIntegrationSteps - 1) / voltages.nIntegrationSteps};
     const size_t nOutFrequencies {obsInfo.nFrequencies / nChannelsToAvg};
