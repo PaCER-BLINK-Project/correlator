@@ -89,13 +89,14 @@ int main(int argc, char **argv){
                     output_filename += get_gpubox_fits_filename(0, xcorr.obsInfo);
                     xcorr.to_fits_file(output_filename);
                 }else{
-                    output_filename += get_mwax_fits_filename(xcorr.obsInfo);
+                    output_filename += get_mwax_fits_filename(xcorr.obsInfo, 0);
                     xcorr.to_fits_file_mwax(output_filename);
                 }
             }else{
                 auto observation = parse_mwa_dat_files(opts.input_files);
-                for (auto& one_second_data : observation) {
+                for (size_t second_idx {0u}; second_idx < observation.size(); second_idx++) {
                     // The following vector is compute mapping to write GPUBOX files.
+                    auto& one_second_data = observation[second_idx];
                     std::vector<unsigned int> coarse_channels;
                     std::vector<Visibilities> vis_vector;
                     #ifdef __GPU__
@@ -132,7 +133,7 @@ int main(int argc, char **argv){
                         }
                     }else{
                         for(auto vis : vis_vector){
-                            auto output_filename = get_mwax_fits_filename(vis.obsInfo);
+                            auto output_filename = get_mwax_fits_filename(vis.obsInfo, second_idx);
                             output_filename = std::string {opts.outputDir + "/" + output_filename};
                             vis.to_fits_file_mwax(output_filename);
                         }

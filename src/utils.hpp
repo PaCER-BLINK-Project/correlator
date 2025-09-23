@@ -71,5 +71,5 @@ std::string unix_to_utcstr(time_t);
 */
 std::string get_gpubox_fits_filename(unsigned int gpubox_number, const ObservationInfo& obs_info);
 
-std::string get_mwax_fits_filename(const ObservationInfo& obs_info);
+std::string get_mwax_fits_filename(const ObservationInfo& obs_info, size_t count);
 #endif
