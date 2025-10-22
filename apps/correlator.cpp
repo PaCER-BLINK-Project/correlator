@@ -13,7 +13,9 @@
 #include <gpu_macros.hpp>
 #include "../src/utils.hpp"
 #include "../src/correlation.hpp"
-
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 enum class DataType {MWA, EDA2};
 
 struct ProgramOptions {
@@ -90,7 +92,7 @@ int main(int argc, char **argv){
                     xcorr.to_fits_file(output_filename);
                 }else{
                     output_filename += get_mwax_fits_filename(xcorr.obsInfo, 0);
-                    xcorr.to_fits_file_mwax(output_filename);
+                    xcorr.to_fits_file_mwax(output_filename, 0);
                 }
             }else{
                 auto observation = parse_mwa_dat_files(opts.input_files);
@@ -106,7 +108,11 @@ int main(int argc, char **argv){
                     #endif
                     for(size_t i = 0; i < one_second_data.size(); i++){
                         #ifdef __GPU__
-                        gpuSetDevice(i % n_gpus);
+                        #ifdef _OPENMP
+                        gpuSetDevice(omp_get_thread_num());
+                        #else
+                        gpuSetDevice(0);
+                        #endif
                         #endif
                         auto& dat_file = one_second_data[i];
                         std::string& input_filename {dat_file.first};
@@ -114,7 +120,7 @@ int main(int argc, char **argv){
                         obs_info.nAntennas = opts.n_antennas;
                         auto xcorr = execute_correlation_on_file(input_filename, obs_info, opts);
                         if(xcorr.on_gpu()) xcorr.to_cpu();
-                        #ifdef __GPU__
+                        #ifdef __OPENMP
                         #pragma omp critical
                         #endif
                         {
@@ -123,9 +129,10 @@ int main(int argc, char **argv){
                         }
                     }
 
+
+                    auto mapping = build_coarse_channel_to_gpubox_mapping(coarse_channels);
                     // Save to disk
                     if(opts.legacy_fits){
-                       auto mapping = build_coarse_channel_to_gpubox_mapping(coarse_channels);
                         for(auto vis : vis_vector){
                             auto output_filename =  get_gpubox_fits_filename(mapping.at(vis.obsInfo.coarseChannel), vis.obsInfo);
                             output_filename = std::string {opts.outputDir + "/" + output_filename};
@@ -135,7 +142,7 @@ int main(int argc, char **argv){
                         for(auto vis : vis_vector){
                             auto output_filename = get_mwax_fits_filename(vis.obsInfo, second_idx);
                             output_filename = std::string {opts.outputDir + "/" + output_filename};
-                            vis.to_fits_file_mwax(output_filename);
+                            vis.to_fits_file_mwax(output_filename, mapping.at(vis.obsInfo.coarseChannel) - 1);
                         }
                     }
                 }
