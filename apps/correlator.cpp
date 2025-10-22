@@ -13,7 +13,9 @@
 #include <gpu_macros.hpp>
 #include "../src/utils.hpp"
 #include "../src/correlation.hpp"
-
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 enum class DataType {MWA, EDA2};
 
 struct ProgramOptions {
@@ -23,6 +25,7 @@ struct ProgramOptions {
     double integrationTime {-1.0}; // No default!
     DataType inputDataType {DataType::MWA};
     int n_antennas {128};
+    bool legacy_fits {false};
 };
 
 
@@ -83,13 +86,19 @@ int main(int argc, char **argv){
                 obs_info.nAntennas = opts.n_antennas;
                 auto xcorr = execute_correlation_on_file(filename, obs_info, opts);
                 if(xcorr.on_gpu()) xcorr.to_cpu();
-                auto output_filename =  get_gpubox_fits_filename(0, xcorr.obsInfo);
-                output_filename = std::string {opts.outputDir + "/" + output_filename};
-                xcorr.to_fits_file(output_filename); 
+                std::string output_filename {opts.outputDir + "/"};
+                if(opts.legacy_fits){
+                    output_filename += get_gpubox_fits_filename(0, xcorr.obsInfo);
+                    xcorr.to_fits_file(output_filename);
+                }else{
+                    output_filename += get_mwax_fits_filename(xcorr.obsInfo, 0);
+                    xcorr.to_fits_file_mwax(output_filename, 0);
+                }
             }else{
                 auto observation = parse_mwa_dat_files(opts.input_files);
-                for (auto& one_second_data : observation) {
+                for (size_t second_idx {0u}; second_idx < observation.size(); second_idx++) {
                     // The following vector is compute mapping to write GPUBOX files.
+                    auto& one_second_data = observation[second_idx];
                     std::vector<unsigned int> coarse_channels;
                     std::vector<Visibilities> vis_vector;
                     #ifdef __GPU__
@@ -99,7 +108,11 @@ int main(int argc, char **argv){
                     #endif
                     for(size_t i = 0; i < one_second_data.size(); i++){
                         #ifdef __GPU__
-                        gpuSetDevice(i % n_gpus);
+                        #ifdef _OPENMP
+                        gpuSetDevice(omp_get_thread_num());
+                        #else
+                        gpuSetDevice(0);
+                        #endif
                         #endif
                         auto& dat_file = one_second_data[i];
                         std::string& input_filename {dat_file.first};
@@ -107,7 +120,7 @@ int main(int argc, char **argv){
                         obs_info.nAntennas = opts.n_antennas;
                         auto xcorr = execute_correlation_on_file(input_filename, obs_info, opts);
                         if(xcorr.on_gpu()) xcorr.to_cpu();
-                        #ifdef __GPU__
+                        #ifdef __OPENMP
                         #pragma omp critical
                         #endif
                         {
@@ -116,12 +129,21 @@ int main(int argc, char **argv){
                         }
                     }
 
-                    // Save to disk
+
                     auto mapping = build_coarse_channel_to_gpubox_mapping(coarse_channels);
-                    for(auto vis : vis_vector){
-                        auto output_filename =  get_gpubox_fits_filename(mapping.at(vis.obsInfo.coarseChannel), vis.obsInfo);
-                        output_filename = std::string {opts.outputDir + "/" + output_filename};
-                        vis.to_fits_file(output_filename); 
+                    // Save to disk
+                    if(opts.legacy_fits){
+                        for(auto vis : vis_vector){
+                            auto output_filename =  get_gpubox_fits_filename(mapping.at(vis.obsInfo.coarseChannel), vis.obsInfo);
+                            output_filename = std::string {opts.outputDir + "/" + output_filename};
+                            vis.to_fits_file(output_filename);
+                        }
+                    }else{
+                        for(auto vis : vis_vector){
+                            auto output_filename = get_mwax_fits_filename(vis.obsInfo, second_idx);
+                            output_filename = std::string {opts.outputDir + "/" + output_filename};
+                            vis.to_fits_file_mwax(output_filename, mapping.at(vis.obsInfo.coarseChannel) - 1);
+                        }
                     }
                 }
             }
@@ -151,6 +173,7 @@ void print_help(std::string exec_name){
     "\t-a <number of antennas>: number of antennas (or better, stations) used for the observation (default: 128).\n"
     "\t-o <output directory>: path to a directory where to save output files. If the directory does\n"
     "\t\t not exist, it will be created. Default is current directory.\n"
+    "\t-l output legacy FITS format instead of the newer MWAX FITS format.\n"
     "\t-i [mwa | eda2]: choose which data type is given in input (default: mwa).\n"
     "\t\t is applied.\n"
     "\n"
@@ -163,10 +186,14 @@ void print_help(std::string exec_name){
 
 
 void parse_program_options(int argc, char** argv, ProgramOptions& opts){
-    const char *options = "s:t:c:o:i:a:";
+    const char *options = "s:t:c:o:i:a:l";
     int current_opt;
     while((current_opt = getopt(argc, argv, options)) != - 1){
         switch(current_opt){
+            case 'l': {
+                opts.legacy_fits = true;
+                break;
+            }
             case 't': {
                 opts.integrationTime = parse_timespec(optarg);
                 if(opts.integrationTime == 0) throw std::invalid_argument("Non positive integration time specified.");

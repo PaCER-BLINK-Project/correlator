@@ -140,3 +140,15 @@ std::string get_gpubox_fits_filename(unsigned int gpubox_number, const Observati
     return fits_filename.str();
 }
 
+// defined in AstroIO. Need to group all these utilities
+time_t gps_to_unix(time_t gps);
+
+
+std::string get_mwax_fits_filename(const ObservationInfo& obs_info, size_t count){
+    std::stringstream fits_filename;
+    fits_filename << std::setfill('0') << obs_info.id << "_" << unix_to_utcstr(gps_to_unix(std::stoi(obs_info.id))) << \
+        "_ch" << std::setw(3) << obs_info.coarseChannel <<  std::setw(0) << "_" \
+        << std::setw(3) << count << std::setw(0) << ".fits";
+    return fits_filename.str();
+}
+
