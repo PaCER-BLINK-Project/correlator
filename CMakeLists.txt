@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.10.0)
 project(correlation)
 include(CTest)
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 
 option(USE_OPENMP "Compile with OpenMP enabled." ON)
 option(USE_CUDA "Compile the code with NVIDIA GPU support." OFF)
