@@ -21,50 +21,75 @@
  * @param res
  */
 template <typename T1, typename T2>
-__host__ __device__ __forceinline__ void ccm(const Complex<T1>& a, const Complex<T1>& b, Complex<T2>& res){
+__host__ __device__ __forceinline__ void ccm(
+    const Complex<T1>& a,
+    const Complex<T1>& b,
+    T2& acc_re, T2& acc_im
+) {
     T2 ar = static_cast<T2>(a.real);
     T2 ai = static_cast<T2>(a.imag);
     T2 br = static_cast<T2>(b.real);
     T2 bi = static_cast<T2>(b.imag);
 
-    res.real += ar * br + ai * bi;
-    res.imag += ai * br - ar * bi;
+    acc_re += ar * br + ai * bi;
+    acc_im += ai * br - ar * bi;
 }
 
+/**
+ * @brief Reinterpret (type pun) helper.
+ *
+ * This function uses `__builtin_memcpy` rather than a `reinterpret_cast<>`, a
+ * standard pattern for type-punning that preserves strict aliasing rules. The
+ * compiler recognises this pattern and optimises away the memcpy.
+ *
+ * More info: https://en.cppreference.com/w/cpp/language/reinterpret_cast.html#Type_aliasing
+ */
+template <typename Tout, typename Tin>
+__device__ __forceinline__ Tout type_alias(Tin in) {
+    Tout out;
+    __builtin_memcpy(&out, &in, sizeof(out));
+    return out;
+}
+
+/**
+ * @brief Dot products four 8-bit integers in pairs (each packed into a 32-bit int)
+ * and accumulates the result.
+ */
 __device__ __forceinline__ int dp4a(int a, int b, int acc) {
-    asm volatile(
-        "v_dot4_i32_i8 %0, %1, %2, %3\n"
-        : "=v"(acc)
-        : "v"(a), "v"(b), "v"(acc)
-    );
+    #if defined(__HIPCC__)
+    return __builtin_amdgcn_sdot4(a, b, acc, false);
+    #elif defined(__NVCC__)
+    return __dp4a(a, b, acc);
+    #else
+    char4 a4 = type_alias<char4>(a);
+    char4 b4 = type_alias<char4>(b);
+    acc += a4.x * b4.x;
+    acc += a4.y * b4.y;
+    acc += a4.z * b4.z;
+    acc += a4.w * b4.w;
     return acc;
+    #endif
 }
 
-__device__ __forceinline__ char4 as_char4(int x) {
-    char4 v;
-    __builtin_memcpy(&v, &x, sizeof(v));
-    return v;
-}
-
-template <typename T>
-__device__ __forceinline__ int as_int(T v) {
-    int x;
-    static_assert(sizeof(T) == sizeof(x));
-    __builtin_memcpy(&x, &v, sizeof(x));
-    return x;
-}
-
+/**
+ * @brief Load two contiguous complex samples, type punning through a single
+ *  32-bit int.
+ */
 __device__ __forceinline__ int load_32bits(const Complex<int8_t>* p) {
     int x;
     __builtin_memcpy(&x, p, sizeof(x));
     return x;
 }
 
+/**
+ * Perform a complex conjugate multiplication on two pairs of complex samples
+ *  that have been packed into two 32-bit integers (each sample is 2x 8-bits).
+ */
 __forceinline__ __device__ void ccm_dp4a(int A, int B, int& acc_re, int& acc_im) {
     // unpack 32-bit int into 4 x 8-bit
-    // trusting the compiler to optimise away the memcpy
-    char4 b = as_char4(B);
+    char4 b = type_alias<char4>(B);
 
+    // constructing the conjugate terms
     char4 bi;
     bi.x = (signed char)(-b.y);
     bi.y = b.x;
@@ -72,24 +97,112 @@ __forceinline__ __device__ void ccm_dp4a(int A, int B, int& acc_re, int& acc_im)
     bi.w = b.z;
 
     // re-packing into 32-bits
-    int Bi = as_int(bi);
+    int Bi = type_alias<int>(bi);
 
     acc_re = dp4a(A, B, acc_re);
     acc_im = dp4a(A, Bi, acc_im);
 }
 
-/*
-Basic idea:
-each integration interval is handled by a different grid on a separate stream.
+/**
+ * @brief Innermost loop of the cross correlation kernel, executed by all warps
+ * in a lane to accumulate over all integration steps for a given baseline x pol
+ * combination.
+ *
+ * Generic implementation for arbitrary sample type @p T.
+ *
+ * @param ch_data Pointer to frequency-local, contiguous voltage data.
+ * @param A0 Base index for antenna/polarization A.
+ * @param B0 Base index for antenna/polarization B.
+ * @param lane_id Warp lane index.
+ * @param n_integration_steps Number of time steps to accumulate.
+ * @return Partial complex correlation accumulated by this lane.
+ */
+template <typename T>
+__device__ __forceinline__ Complex<float> cross_correlation_inner(
+    const Complex<T>* __restrict__ ch_data,
+    const size_t A0,
+    const size_t B0,
+    unsigned int lane_id,
+    unsigned int n_integration_steps
+) {
 
-each grid handles an integration interval. In particular, there is a block
-for each frequency. At least initially.
+    Complex<float> acc0 {0.f, 0.f};
+    Complex<float> acc1 {0.f, 0.f};
+    Complex<float> acc2 {0.f, 0.f};
+    Complex<float> acc3 {0.f, 0.f};
 
-So each block handles cross correlation of all baselines in a frequency channel.
+    unsigned int step = lane_id;
 
-Each thread represents a baseline.
+    for (; step + 3u * warpSize < n_integration_steps; step += 4u * warpSize) {
+        ccm(ch_data[A0 + step],                 ch_data[B0 + step],                 acc0.real, acc0.imag);
+        ccm(ch_data[A0 + step + warpSize],      ch_data[B0 + step + warpSize],      acc1.real, acc1.imag);
+        ccm(ch_data[A0 + step + 2u * warpSize], ch_data[B0 + step + 2u * warpSize], acc2.real, acc2.imag);
+        ccm(ch_data[A0 + step + 3u * warpSize], ch_data[B0 + step + 3u * warpSize], acc3.real, acc3.imag);
+    }
 
-*/
+    // get any remainder (at most 3 iterations)
+    for (; step < n_integration_steps; step += warpSize) {
+        ccm(ch_data[A0 + step], ch_data[B0 + step], acc0.real, acc0.imag);
+    }
+
+    Complex<float> acc {
+        acc0.real + acc1.real + acc2.real + acc3.real,
+        acc0.imag + acc1.imag + acc2.imag + acc3.imag
+    };
+    return acc;
+}
+
+/**
+ * @brief Innermost loop of the cross correlation kernel, executed by all warps
+ * in a lane to accumulate over all integration steps for a given baseline x pol
+ * combination.
+ *
+ * Optimised specialisation for `int8_t` samples. Uses packed arithmetic
+ * optimizations and is significantly faster than the generic template. Should
+ * be preferred whenever int8 voltages are available.
+ *
+ * @param ch_data Pointer to frequency-local, contiguous voltage data.
+ * @param A0 Base index for antenna/polarization A.
+ * @param B0 Base index for antenna/polarization B.
+ * @param lane_id Warp lane index.
+ * @param n_integration_steps Number of time steps to accumulate.
+ * @return Partial complex correlation accumulated by this lane.
+ */
+__device__ __forceinline__ Complex<float> cross_correlation_inner(
+    const Complex<int8_t>* __restrict__ ch_data,
+    const size_t A0,
+    const size_t B0,
+    unsigned int lane_id,
+    unsigned int n_integration_steps
+) {
+    unsigned int step = 2u * lane_id;
+    int acc_re = 0, acc_im = 0;
+
+    for (; step + 1 < n_integration_steps; step += 2u * warpSize) {
+        int A = load_32bits(&ch_data[A0 + step]);
+        int B = load_32bits(&ch_data[B0 + step]);
+        ccm_dp4a(A, B, acc_re, acc_im);
+    }
+
+    // get any remainder
+    for (; step < n_integration_steps; step += warpSize) {
+        auto &a = ch_data[A0 + step];
+        auto &b = ch_data[B0 + step];
+        ccm(a, b, acc_re, acc_im);
+    }
+
+    Complex<float> acc{
+        static_cast<float>(acc_re),
+        static_cast<float>(acc_im)
+    };
+    return acc;
+}
+
+/**
+ * Each grid handles an integration interval. In particular, there is a block
+ * for each (input) frequency. Each warp handles one output frequency for one
+ * baseline.
+ */
 template <int NPOL, typename T>
 __global__ void cross_correlation_kernel(
     const Complex<T>* __restrict__ volt,
@@ -133,45 +246,22 @@ __global__ void cross_correlation_kernel(
             #pragma unroll
             for (unsigned int pol_b = 0; pol_b < NPOL; pol_b++) {
 
-                Complex<float> acc0 {0.f, 0.f};
-                Complex<float> acc1 {0.f, 0.f};
-                Complex<float> acc2 {0.f, 0.f};
-                Complex<float> acc3 {0.f, 0.f};
-
-                unsigned int step = lane_id;
                 const size_t A0 = base_a + (size_t)pol_a * n_integration_steps;
                 const size_t B0 = base_b + (size_t)pol_b * n_integration_steps;
 
-                // Each thread computes the reduction on its assigned elements independently from the other threads in the
-                // same warp. However, threads access contiguous memory locations, so they are using the cache well. To
-                // to a better job, one would need to "unpack" complex values into two sequences of real and imag values.
-                // unrolled body: process 4 iterations per loop
-                for (; step + 3u * warpSize < n_integration_steps; step += 4u * warpSize) {
-                    ccm(ch_data[A0 + step],                 ch_data[B0 + step], acc0);
-                    ccm(ch_data[A0 + step + warpSize],      ch_data[B0 + step + warpSize], acc1);
-                    ccm(ch_data[A0 + step + 2u * warpSize], ch_data[B0 + step + 2u * warpSize], acc2);
-                    ccm(ch_data[A0 + step + 3u * warpSize], ch_data[B0 + step + 3u * warpSize], acc3);
-                }
-
-                // get any remainder (at most 3 iterations)
-                for (; step < n_integration_steps; step += warpSize) {
-                    ccm(ch_data[A0 + step], ch_data[B0 + step], acc0);
-                }
-
-                Complex<float> acc {
-                    acc0.real + acc1.real + acc2.real + acc3.real,
-                    acc0.imag + acc1.imag + acc2.imag + acc3.imag
-                };
+                Complex<float> acc = cross_correlation_inner(
+                    ch_data, A0, B0, lane_id, n_integration_steps
+                );
 
                 // now integrate results in accum
-                for (unsigned int i = warpSize/2; i >= 1; i >>=1) {
+                for (unsigned int i = warpSize/2; i >= 1; i >>= 1) {
                     float up = __gpu_shfl_down(acc.real, i);
                     if(lane_id < i){
                         acc.real += up;
                     }
                 }
                     // now integrate results in accum
-                for (unsigned int i = warpSize/2; i >= 1; i >>=1) {
+                for (unsigned int i = warpSize/2; i >= 1; i >>= 1) {
                     float up = __gpu_shfl_down(acc.imag, i);
                     if(lane_id < i){
                         acc.imag += up;
@@ -188,97 +278,6 @@ __global__ void cross_correlation_kernel(
     }
 }
 
-template <int NPOL>
-__global__ void cross_correlation_kernel(
-    const Complex<int8_t>* __restrict__ volt,
-    const ObservationInfo obs,
-    unsigned int n_integration_steps,
-    unsigned int n_channels_to_avg,
-    Complex<float>* __restrict__ xcorr
-) {
-    const unsigned int n_baselines {(obs.nAntennas * (obs.nAntennas + 1)) / 2};
-    const unsigned int n_total_warps { n_baselines * (obs.nFrequencies / n_channels_to_avg)};
-    const unsigned int samples_in_frequency {obs.nAntennas * NPOL * n_integration_steps};
-    const size_t matrix_size {n_baselines * NPOL * NPOL};
-    const double integration_time {obs.timeResolution * n_integration_steps};
-
-    const unsigned int warp_id {threadIdx.x / warpSize};
-    const unsigned int lane_id {threadIdx.x % warpSize};
-    const unsigned int glb_warp_id {blockIdx.x * WARPS_PER_BLOCK + warp_id};
-    const unsigned int out_frequency {glb_warp_id / n_baselines};
-    const unsigned int baseline {glb_warp_id % n_baselines};
-
-    if(glb_warp_id >= n_total_warps) return;
-
-    Complex<float> *out_data {xcorr + out_frequency * matrix_size };
-
-    const unsigned int ant1 {static_cast<unsigned int>(-0.5 + sqrt(0.25 + 2*baseline))};
-    const unsigned int ant2 {baseline - ((ant1 + 1) * ant1)/2};
-
-    const size_t base_a = ant1 * n_integration_steps * NPOL;
-    const size_t base_b = ant2 * n_integration_steps * NPOL;
-
-    const float norm = 1.f / (float)(integration_time * (double)n_channels_to_avg);
-
-    const Complex<int8_t> *ch_data {volt + samples_in_frequency * out_frequency * n_channels_to_avg};
-
-    // for each baseline compute the correlation matrix of its polarization
-    for (unsigned int ch = 0; ch < n_channels_to_avg; ch++, ch_data += samples_in_frequency) {
-
-        #pragma unroll
-        for (unsigned int pol_a = 0; pol_a < NPOL; pol_a++) {
-            #pragma unroll
-            for (unsigned int pol_b = 0; pol_b < NPOL; pol_b++) {
-
-                const size_t A0 = base_a + (size_t)pol_a * n_integration_steps;
-                const size_t B0 = base_b + (size_t)pol_b * n_integration_steps;
-
-                unsigned int step = 2u * lane_id;
-                int acc_re = 0, acc_im = 0;
-
-                for (; step + 1 < n_integration_steps; step += 2u * warpSize) {
-                    int A = load_32bits(&ch_data[A0 + step]);
-                    int B = load_32bits(&ch_data[B0 + step]);
-                    ccm_dp4a(A, B, acc_re, acc_im);
-                }
-
-                // get any remainder
-                for (; step < n_integration_steps; step += warpSize) {
-                    auto &a = ch_data[A0 + step];
-                    auto &b = ch_data[B0 + step];
-                    acc_re += int(a.real)*int(b.real) + int(a.imag)*int(b.imag);
-                    acc_im += int(a.imag)*int(b.real) - int(a.real)*int(b.imag);
-                }
-
-                Complex<float> acc{
-                    static_cast<float>(acc_re),
-                    static_cast<float>(acc_im)
-                };
-
-                // now integrate results in accum
-                for (unsigned int i = warpSize/2; i >= 1; i >>=1) {
-                    float up = __gpu_shfl_down(acc.real, i);
-                    if(lane_id < i){
-                        acc.real += up;
-                    }
-                }
-                    // now integrate results in accum
-                for (unsigned int i = warpSize/2; i >= 1; i >>=1) {
-                    float up = __gpu_shfl_down(acc.imag, i);
-                    if(lane_id < i){
-                        acc.imag += up;
-                    }
-                }
-
-                if (lane_id == 0) {
-                    size_t out_index { baseline * NPOL * NPOL + pol_a*NPOL + pol_b};
-                    out_data[out_index].real = fmaf(acc.real, norm, out_data[out_index].real);
-                    out_data[out_index].imag = fmaf(acc.imag, norm, out_data[out_index].imag);
-                }
-            }
-        }
-    }
-}
 
 Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int n_channels_to_avg){
     const ObservationInfo& obs_info {voltages.obsInfo};
@@ -303,21 +302,6 @@ Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int n_chan
     if (obs_info.nPolarizations != 2) {
         throw std::invalid_argument {"Expected 2 polarizations per antenna"};
     }
-
-    if(n_channels_to_avg < 1 || n_channels_to_avg > voltages.obsInfo.nFrequencies)
-        throw std::invalid_argument {"NChannelsToAvg is out of range."};
-    if(voltages.obsInfo.nTimesteps % voltages.nIntegrationSteps != 0)
-        throw std::invalid_argument {"nTimesteps is not an integer multiple of nIntegrationSteps."};
-
-    if (!voltages.on_gpu() && !voltages.pinned()) {
-        std::cerr << "'cross_correlation_gpu' warning: CPU memory is not pinned.\n"
-                     "This will result in poor performance." << std::endl;
-    }
-
-    if (voltages.obsInfo.nPolarizations != 2) {
-        throw std::invalid_argument {"Expected 2 polarizations per antenna"};
-    }
-
 
     // values to compute output size and indexing
     const unsigned int n_baselines {((obs_info.nAntennas + 1) * obs_info.nAntennas) / 2};
@@ -358,16 +342,21 @@ Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int n_chan
     int device_id, warp_size;
     gpuGetDevice(&device_id);
     gpuDeviceGetAttribute(&warp_size, gpuDeviceAttributeWarpSize, device_id);
-    const int n_threads_per_block {warp_size * WARPS_PER_BLOCK};
-    const int n_total_warps {static_cast<int>(n_baselines * nOutFrequencies)};
-    const int n_blocks {(n_total_warps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK};
+
+    const int n_threads_per_block = warp_size * WARPS_PER_BLOCK;
+    const int n_total_warps = n_baselines * nOutFrequencies;
+    // ceil(n_total_warps / WARPS_PER_BLOCK)
+    const int n_blocks = (n_total_warps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
 
     for (int i {0}; i < nIntervals; i++) {
         if (!voltages.on_gpu()) {
-            gpuMemcpyAsync(dev_voltages.data() + i*samplesInTimeInterval,
+            gpuMemcpyAsync(
+                dev_voltages.data() + i*samplesInTimeInterval,
                 voltages.data() + i*samplesInTimeInterval,
                 sizeof(Complex<int8_t>) * samplesInTimeInterval,
-                gpuMemcpyHostToDevice, streams[i % nStreams]);
+                gpuMemcpyHostToDevice,
+                streams[i % nStreams]
+            );
         }
         cross_correlation_kernel<2> <<< dim3(n_blocks), dim3(n_threads_per_block), 0, streams[i % nStreams] >>> (
             dev_voltages_data + i*samplesInTimeInterval,
