@@ -185,7 +185,7 @@ __device__ __forceinline__ Complex<float> cross_correlation_inner(
     }
 
     // get any remainder
-    for (; step < n_integration_steps; step += warpSize) {
+    for (; step < n_integration_steps; step += 2u * warpSize) {
         auto &a = ch_data[A0 + step];
         auto &b = ch_data[B0 + step];
         ccm(a, b, acc_re, acc_im);
@@ -226,7 +226,11 @@ __global__ void cross_correlation_kernel(
 
     if(glb_warp_id >= n_total_warps) return;
 
-    Complex<float> *out_data {xcorr + out_frequency * matrix_size };
+    const Complex<T> *ch_data = volt
+        + (size_t)samples_in_frequency * out_frequency * n_channels_to_avg;
+
+    Complex<float> *out_data = xcorr
+        + (size_t)out_frequency * matrix_size;
 
     const unsigned int ant1 {static_cast<unsigned int>(-0.5 + sqrt(0.25 + 2*baseline))};
     const unsigned int ant2 {baseline - ((ant1 + 1) * ant1)/2};
@@ -235,8 +239,6 @@ __global__ void cross_correlation_kernel(
     const size_t base_b = ant2 * n_integration_steps * NPOL;
 
     const float norm = 1.f / (float)(integration_time * (double)n_channels_to_avg);
-
-    const Complex<T> *ch_data {volt + samples_in_frequency * out_frequency * n_channels_to_avg};
 
     // for each baseline compute the correlation matrix of its polarization
     for (unsigned int ch = 0; ch < n_channels_to_avg; ch++, ch_data += samples_in_frequency) {
@@ -278,6 +280,116 @@ __global__ void cross_correlation_kernel(
     }
 }
 
+template<>
+__global__ void cross_correlation_kernel<2, int8_t>(
+    const Complex<int8_t>* __restrict__ volt,
+    const ObservationInfo obs,
+    unsigned int n_integration_steps,
+    unsigned int n_channels_to_avg,
+    Complex<float>* __restrict__ xcorr
+) {
+    constexpr int NPOL = 2;
+
+    const unsigned int n_baselines {(obs.nAntennas * (obs.nAntennas + 1)) / 2};
+    const unsigned int n_total_warps { n_baselines * (obs.nFrequencies / n_channels_to_avg)};
+    const unsigned int samples_in_frequency {obs.nAntennas * NPOL * n_integration_steps};
+    const size_t matrix_size {n_baselines * NPOL * NPOL};
+    const double integration_time {obs.timeResolution * n_integration_steps};
+
+    const unsigned int warp_id {threadIdx.x / warpSize};
+    const unsigned int lane_id {threadIdx.x % warpSize};
+    const unsigned int glb_warp_id {blockIdx.x * WARPS_PER_BLOCK + warp_id};
+    const unsigned int out_frequency {glb_warp_id / n_baselines};
+    const unsigned int baseline {glb_warp_id % n_baselines};
+
+    if(glb_warp_id >= n_total_warps) return;
+
+    const Complex<int8_t> *ch_data = volt
+        + (size_t)samples_in_frequency * out_frequency * n_channels_to_avg;
+
+    Complex<float> *out_data = xcorr
+        + (size_t)out_frequency * matrix_size;
+
+    const unsigned int ant1 {static_cast<unsigned int>(-0.5 + sqrt(0.25 + 2*baseline))};
+    const unsigned int ant2 {baseline - ((ant1 + 1) * ant1)/2};
+
+    const size_t base_a = ant1 * n_integration_steps * NPOL;
+    const size_t base_b = ant2 * n_integration_steps * NPOL;
+
+    const float norm = 1.f / (float)(integration_time * (double)n_channels_to_avg);
+
+    for (unsigned int ch = 0; ch < n_channels_to_avg; ch++, ch_data += samples_in_frequency) {
+
+        const size_t A00 = base_a + 0u * n_integration_steps;
+        const size_t A01 = base_a + 1u * n_integration_steps;
+        const size_t B00 = base_b + 0u * n_integration_steps;
+        const size_t B01 = base_b + 1u * n_integration_steps;
+
+        unsigned int step = 2u * lane_id;
+        int acc00_re = 0, acc00_im = 0;
+        int acc01_re = 0, acc01_im = 0;
+        int acc10_re = 0, acc10_im = 0;
+        int acc11_re = 0, acc11_im = 0;
+
+        for (; step + 1 < n_integration_steps; step += 2u * warpSize) {
+            int A0 = load_32bits(&ch_data[A00 + step]);
+            int A1 = load_32bits(&ch_data[A01 + step]);
+            int B0 = load_32bits(&ch_data[B00 + step]);
+            int B1 = load_32bits(&ch_data[B01 + step]);
+
+            ccm_dp4a(A0, B0, acc00_re, acc00_im);
+            ccm_dp4a(A0, B1, acc01_re, acc01_im);
+            ccm_dp4a(A1, B0, acc10_re, acc10_im);
+            ccm_dp4a(A1, B1, acc11_re, acc11_im);
+        }
+
+        // get any remainder
+        for (; step < n_integration_steps; step += 2u * warpSize) {
+            const auto &a0 = ch_data[A00 + step];
+            const auto &a1 = ch_data[A01 + step];
+            const auto &b0 = ch_data[B00 + step];
+            const auto &b1 = ch_data[B01 + step];
+            ccm(a0, b0, acc00_re, acc00_im);
+            ccm(a0, b1, acc01_re, acc01_im);
+            ccm(a1, b0, acc10_re, acc10_im);
+            ccm(a1, b1, acc11_re, acc11_im);
+        }
+
+        float f00_re = (float)acc00_re, f00_im = (float)acc00_im;
+        float f01_re = (float)acc01_re, f01_im = (float)acc01_im;
+        float f10_re = (float)acc10_re, f10_im = (float)acc10_im;
+        float f11_re = (float)acc11_re, f11_im = (float)acc11_im;
+
+        // warp reduce helper
+        auto warp_sum = [&](float v) {
+            for (unsigned i = warpSize/2; i >= 1; i >>= 1) {
+                v += __gpu_shfl_down(v, i);
+            }
+            return v;
+        };
+
+        f00_re = warp_sum(f00_re); f00_im = warp_sum(f00_im);
+        f01_re = warp_sum(f01_re); f01_im = warp_sum(f01_im);
+        f10_re = warp_sum(f10_re); f10_im = warp_sum(f10_im);
+        f11_re = warp_sum(f11_re); f11_im = warp_sum(f11_im);
+
+        if (lane_id == 0) {
+            size_t base = baseline * 4u;
+            // 00
+            out_data[base + 0].real = fmaf(f00_re, norm, out_data[base + 0].real);
+            out_data[base + 0].imag = fmaf(f00_im, norm, out_data[base + 0].imag);
+            // 01
+            out_data[base + 1].real = fmaf(f01_re, norm, out_data[base + 1].real);
+            out_data[base + 1].imag = fmaf(f01_im, norm, out_data[base + 1].imag);
+            // 10
+            out_data[base + 2].real = fmaf(f10_re, norm, out_data[base + 2].real);
+            out_data[base + 2].imag = fmaf(f10_im, norm, out_data[base + 2].imag);
+            // 11
+            out_data[base + 3].real = fmaf(f11_re, norm, out_data[base + 3].real);
+            out_data[base + 3].imag = fmaf(f11_im, norm, out_data[base + 3].imag);
+        }
+    }
+}
 
 Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int n_channels_to_avg){
     const ObservationInfo& obs_info {voltages.obsInfo};
@@ -349,21 +461,25 @@ Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int n_chan
     const int n_blocks = (n_total_warps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
 
     for (int i {0}; i < nIntervals; i++) {
+        const gpuStream_t stream = streams[i % nStreams];
         if (!voltages.on_gpu()) {
+            const size_t off = i*samplesInTimeInterval;
+            const size_t count = samplesInTimeInterval;
             gpuMemcpyAsync(
-                dev_voltages.data() + i*samplesInTimeInterval,
-                voltages.data() + i*samplesInTimeInterval,
-                sizeof(Complex<int8_t>) * samplesInTimeInterval,
+                dev_voltages.data() + off,
+                voltages.data() + off,
+                sizeof(Complex<int8_t>) * count,
                 gpuMemcpyHostToDevice,
-                streams[i % nStreams]
+                stream
             );
         }
-        cross_correlation_kernel<2> <<< dim3(n_blocks), dim3(n_threads_per_block), 0, streams[i % nStreams] >>> (
+        cross_correlation_kernel<2><<<dim3(n_blocks), dim3(n_threads_per_block), 0, stream>>> (
             dev_voltages_data + i*samplesInTimeInterval,
             obs_info,
             voltages.nIntegrationSteps,
             n_channels_to_avg,
-            reinterpret_cast<Complex<float>*>(dev_xcorr.data()) + i*nValuesInTimeInterval);
+            reinterpret_cast<Complex<float>*>(dev_xcorr.data())
+        );
     }
 
     gpuDeviceSynchronize();
@@ -441,12 +557,6 @@ extern "C" int blink_cross_correlation_gpu(const float* voltages, float* visibil
     const int n_blocks {(n_total_warps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK};
 
     for(int i {0}; i < nIntervals; i++){
-        // if(!voltages.on_gpu()){
-        //     gpuMemcpyAsync(dev_voltages.data() + i*samplesInTimeInterval,
-        //         voltages.data() + i*samplesInTimeInterval,
-        //         sizeof(Complex<int8_t>) * samplesInTimeInterval,
-        //         gpuMemcpyHostToDevice, streams[i % nStreams]);
-        // }
         cross_correlation_kernel<2> <<< dim3(n_blocks), dim3(n_threads_per_block), 0, streams[i % nStreams] >>> (
             reinterpret_cast<const Complex<float>*>(voltages) + i*samplesInTimeInterval, obsInfo, n_integrated_samples,
             n_channels_to_avg, dev_xcorr + i*nValuesInTimeInterval);
@@ -455,6 +565,7 @@ extern "C" int blink_cross_correlation_gpu(const float* voltages, float* visibil
     gpuDeviceSynchronize();
     for(int i {0}; i < nStreams; i++)
         gpuStreamDestroy(streams[i]);
+    delete[] streams;
 
     return 0;
 }

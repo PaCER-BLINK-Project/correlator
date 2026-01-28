@@ -3,8 +3,9 @@
 #include <iostream>
 #include <locale>
 
-#include <unistd.h>
+#include <getopt.h>
 #include <cstdlib>
+#include <functional>
 
 #include "common.hpp"
 #include "../src/correlation.hpp"
@@ -19,6 +20,7 @@ struct Options {
     unsigned int channels = 4;
     double itime;
     std::string itime_string;
+    bool check = true;
 
     void set_trials(const char* value) {
         trials = static_cast<unsigned int>(std::strtoul(value, nullptr, 10));
@@ -43,7 +45,8 @@ struct Options {
             << "Usage: ./correlation_benchmark"
             << " -i <integration time>"
             << " -t <trials>"
-            << " -c <channels>\n";
+            << " -c <channels>"
+            << " --no-check\n";
     }
 private:
     bool has_trials = false;
@@ -51,16 +54,30 @@ private:
     bool has_itime = false;
 };
 
+
 int parse_options(int argc, char** argv, Options& opt) {
+    static option lopts[] = {
+        {"no-check", no_argument, nullptr, 0},
+        {nullptr, 0, nullptr, 0}
+    };
+
     int arg;
-    while ((arg = getopt(argc, argv, "i:t:c:")) != -1) {
+    int index = 0;
+
+    while ((arg = getopt_long(argc, argv, "i:t:c:", lopts, &index)) != -1) {
         switch (arg) {
+            case 0:
+                if (std::string(lopts[index].name) == "no-check") {
+                    opt.check = false;
+                }
+                break;
             case 'i': opt.set_itime(optarg); break;
             case 't': opt.set_trials(optarg); break;
             case 'c': opt.set_channels(optarg); break;
             default: opt.usage(); return 1;
         }
     }
+
     if (!opt.complete()) { opt.usage(); return 1; }
     return 0;
 }
@@ -143,11 +160,13 @@ struct Info {
     size_t samples_per_interval;
     size_t n_intervals;
     size_t n_antennas;
+    size_t n_baselines;
     size_t n_steps;
     size_t threads_per_block;
     size_t n_out_freq;
     size_t total_wavefronts;
     size_t blocks;
+    int warp_size;
     double itime;
     std::vector<double> times;
 
@@ -157,10 +176,14 @@ struct Info {
             remove_largest(times);
         }
 
+        int device_id;
+        gpuGetDevice(&device_id);
+        gpuDeviceGetAttribute(&warp_size, gpuDeviceAttributeWarpSize, device_id);
+
         itime = op.itime;
 
         const ObservationInfo& obs {volt.obsInfo};
-        const unsigned int n_baselines {((obs.nAntennas + 1) * obs.nAntennas) / 2};
+        n_baselines = ((obs.nAntennas + 1) * obs.nAntennas) / 2;
 
         n_antennas = obs.nAntennas;
         n_steps = volt.nIntegrationSteps;
@@ -171,10 +194,14 @@ struct Info {
         n_out_freq = obs.nFrequencies / op.channels;
         out_size = matrix_size * n_out_freq * n_intervals;
 
-        samples_per_interval = volt.nIntegrationSteps * obs.nPolarizations * obs.nAntennas * obs.nFrequencies;
+        samples_per_interval =
+            volt.nIntegrationSteps
+            * obs.nPolarizations
+            * obs.nAntennas
+            * obs.nFrequencies;
 
-        threads_per_block = WARP_SIZE * WARPS_PER_BLOCK;
-        total_wavefronts = static_cast<int>(n_baselines * n_out_freq);
+        threads_per_block = warp_size * WARPS_PER_BLOCK;
+        total_wavefronts = n_baselines * n_out_freq;
         blocks = (total_wavefronts + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
     }
 
@@ -187,6 +214,37 @@ struct Info {
         return std::pair{*mi, *ma};
     }
 };
+
+#define FIELD(label, field) {label, [&]{ std::cout << info.field;}}
+
+void print_info(const Info& info) {
+    struct Field { const std::string name; std::function<void()> print; };
+
+    std::vector<Field> fields = {
+        FIELD("mean time (ms)", mean_time()),
+        FIELD("integ. time (sec)", itime),
+        FIELD("integ. steps", n_steps),
+        FIELD("intervals", n_intervals),
+        FIELD("samples/interval", samples_per_interval),
+        FIELD("baselines", n_baselines),
+        FIELD("threads/block", threads_per_block),
+        FIELD("blocks", blocks),
+        FIELD("warps", total_wavefronts),
+        FIELD("warp size", warp_size),
+        FIELD("output freq.", n_out_freq)
+    };
+
+    size_t label_width = 0;
+    for (const auto& f : fields) {
+        label_width = std::max(label_width, f.name.size());
+    }
+
+    for (const auto& f : fields) {
+        std::cout << std::left << std::setw(label_width + 1) << f.name << ": ";
+        f.print();
+        std::cout << '\n';
+    }
+}
 
 Info correlate(
     const Voltages& volt,
@@ -226,12 +284,6 @@ std::string get_data_dir() {
     return std::string(root);
 }
 
-template <typename T>
-void p(const char* k, T v) {
-    std::cout << std::left << std::setw(21) << k << ": "
-              << std::right << std::setw(16) << v << '\n';
-}
-
 int main(int argc, char** argv) {
     Options options;
     if (parse_options(argc, argv, options) != 0) {
@@ -245,25 +297,15 @@ int main(int argc, char** argv) {
     std::cout << "Running correlation on " << file << "\n"
         << " integration time: " << options.itime_string << "\n"
         << " channels:         " << options.channels << "\n"
-        << " trials:           " << options.trials << "\n\n";
+        << " trials:           " << options.trials << "\n"
+        << " checking correct: " << (options.check ? "true" : "false") << "\n\n";
 
     unsigned int n_integ_steps =
         static_cast<unsigned int>(options.itime / VCS_OBSERVATION_INFO.timeResolution);
 
     auto volt = Voltages::from_dat_file(file, VCS_OBSERVATION_INFO, n_integ_steps);
 
-
-    auto info = correlate(volt, options, true);
-
-    p("mean time (ms)", info.mean_time());
-    p("integ. time", info.itime);
-    p("integ. steps", info.n_steps);
-    p("samples/interval", info.samples_per_interval);
-    p("intervals", info.n_intervals);
-    p("output", info.out_size);
-    p("output freq.", info.n_out_freq);
-    p("work items per group", info.threads_per_block);
-    p("total wavefronts", info.total_wavefronts);
-    p("workgroups", info.blocks);
+    auto info = correlate(volt, options, options.check);
+    print_info(info);
     std::cout << std::endl;
 }
