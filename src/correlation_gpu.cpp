@@ -478,7 +478,7 @@ Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int n_chan
             obs_info,
             voltages.nIntegrationSteps,
             n_channels_to_avg,
-            reinterpret_cast<Complex<float>*>(dev_xcorr.data())
+            reinterpret_cast<Complex<float>*>(dev_xcorr.data()) + i*nValuesInTimeInterval
         );
     }
 
