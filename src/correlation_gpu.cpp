@@ -9,30 +9,36 @@
 
 
 #define WARPS_PER_BLOCK 8
+#define N_POLARIZATIONS 2
 
 /**
  * @brief Compute the conjugate cross multiply (ccm) between std::complex numbers `a` and `b`
  * and add the result to the `res` accumulator.
- *
- * @tparam T1
- * @tparam T2
- * @param a
- * @param b
- * @param res
  */
 template <typename T1, typename T2>
 __host__ __device__ __forceinline__ void ccm(
     const Complex<T1>& a,
     const Complex<T1>& b,
-    T2& acc_re, T2& acc_im
+    Complex<T2>& acc
 ) {
     T2 ar = static_cast<T2>(a.real);
     T2 ai = static_cast<T2>(a.imag);
     T2 br = static_cast<T2>(b.real);
     T2 bi = static_cast<T2>(b.imag);
 
-    acc_re += ar * br + ai * bi;
-    acc_im += ai * br - ar * bi;
+    acc.real += ar * br + ai * bi;
+    acc.imag += ai * br - ar * bi;
+}
+
+/**
+ * @brief Simple helper to accumulate complex values accross warps using shfl_down.
+ */
+__device__ __forceinline__ Complex<float> warp_sum(Complex<float> acc) {
+    for (unsigned int i = warpSize/2; i > 0; i >>= 1) {
+        acc.real += __gpu_shfl_down(acc.real, i);
+        acc.imag += __gpu_shfl_down(acc.imag, i);
+    }
+    return acc;
 }
 
 /**
@@ -85,7 +91,7 @@ __device__ __forceinline__ int load_32bits(const Complex<int8_t>* p) {
  * Perform a complex conjugate multiplication on two pairs of complex samples
  *  that have been packed into two 32-bit integers (each sample is 2x 8-bits).
  */
-__forceinline__ __device__ void ccm_dp4a(int A, int B, int& acc_re, int& acc_im) {
+__forceinline__ __device__ void ccm_dp4a(int A, int B, Complex<int>& acc) {
     // unpack 32-bit int into 4 x 8-bit
     char4 b = type_alias<char4>(B);
 
@@ -99,8 +105,8 @@ __forceinline__ __device__ void ccm_dp4a(int A, int B, int& acc_re, int& acc_im)
     // re-packing into 32-bits
     int Bi = type_alias<int>(bi);
 
-    acc_re = dp4a(A, B, acc_re);
-    acc_im = dp4a(A, Bi, acc_im);
+    acc.real = dp4a(A, B, acc.real);
+    acc.imag = dp4a(A, Bi, acc.imag);
 }
 
 /**
@@ -134,15 +140,15 @@ __device__ __forceinline__ Complex<float> cross_correlation_inner(
     unsigned int step = lane_id;
 
     for (; step + 3u * warpSize < n_integration_steps; step += 4u * warpSize) {
-        ccm(ch_data[A0 + step],                 ch_data[B0 + step],                 acc0.real, acc0.imag);
-        ccm(ch_data[A0 + step + warpSize],      ch_data[B0 + step + warpSize],      acc1.real, acc1.imag);
-        ccm(ch_data[A0 + step + 2u * warpSize], ch_data[B0 + step + 2u * warpSize], acc2.real, acc2.imag);
-        ccm(ch_data[A0 + step + 3u * warpSize], ch_data[B0 + step + 3u * warpSize], acc3.real, acc3.imag);
+        ccm(ch_data[A0 + step],                 ch_data[B0 + step],                 acc0);
+        ccm(ch_data[A0 + step + warpSize],      ch_data[B0 + step + warpSize],      acc1);
+        ccm(ch_data[A0 + step + 2u * warpSize], ch_data[B0 + step + 2u * warpSize], acc2);
+        ccm(ch_data[A0 + step + 3u * warpSize], ch_data[B0 + step + 3u * warpSize], acc3);
     }
 
     // get any remainder (at most 3 iterations)
     for (; step < n_integration_steps; step += warpSize) {
-        ccm(ch_data[A0 + step], ch_data[B0 + step], acc0.real, acc0.imag);
+        ccm(ch_data[A0 + step], ch_data[B0 + step], acc0);
     }
 
     Complex<float> acc {
@@ -176,26 +182,26 @@ __device__ __forceinline__ Complex<float> cross_correlation_inner(
     unsigned int n_integration_steps
 ) {
     unsigned int step = 2u * lane_id;
-    int acc_re = 0, acc_im = 0;
+    Complex<int> acc{0, 0};
 
     for (; step + 1 < n_integration_steps; step += 2u * warpSize) {
         int A = load_32bits(&ch_data[A0 + step]);
         int B = load_32bits(&ch_data[B0 + step]);
-        ccm_dp4a(A, B, acc_re, acc_im);
+        ccm_dp4a(A, B, acc);
     }
 
     // get any remainder
     for (; step < n_integration_steps; step += 2u * warpSize) {
         auto &a = ch_data[A0 + step];
         auto &b = ch_data[B0 + step];
-        ccm(a, b, acc_re, acc_im);
+        ccm(a, b, acc);
     }
 
-    Complex<float> acc{
-        static_cast<float>(acc_re),
-        static_cast<float>(acc_im)
+    Complex<float> facc{
+        static_cast<float>(acc.real),
+        static_cast<float>(acc.imag)
     };
-    return acc;
+    return facc;
 }
 
 /**
@@ -255,23 +261,10 @@ __global__ void cross_correlation_kernel(
                     ch_data, A0, B0, lane_id, n_integration_steps
                 );
 
-                // now integrate results in accum
-                for (unsigned int i = warpSize/2; i >= 1; i >>= 1) {
-                    float up = __gpu_shfl_down(acc.real, i);
-                    if(lane_id < i){
-                        acc.real += up;
-                    }
-                }
-                    // now integrate results in accum
-                for (unsigned int i = warpSize/2; i >= 1; i >>= 1) {
-                    float up = __gpu_shfl_down(acc.imag, i);
-                    if(lane_id < i){
-                        acc.imag += up;
-                    }
-                }
+                acc = warp_sum(acc);
 
                 if (lane_id == 0) {
-                    size_t out_index { baseline * NPOL * NPOL + pol_a*NPOL + pol_b};
+                    size_t out_index = baseline*NPOL*NPOL + pol_a*NPOL + pol_b;
                     out_data[out_index].real = fmaf(acc.real, norm, out_data[out_index].real);
                     out_data[out_index].imag = fmaf(acc.imag, norm, out_data[out_index].imag);
                 }
@@ -280,6 +273,14 @@ __global__ void cross_correlation_kernel(
     }
 }
 
+/**
+ * @brief Specialisation of cross correlation kernel for 2 polarizations and 8-bit
+ * integer samples.
+ *
+ * Fuses the polarization loops to eliminate branching and increase memory ops
+ * per loop. Also uses the same packed arithmetic optimisations as the generic
+ * kernel.
+ */
 template<>
 __global__ void cross_correlation_kernel<2, int8_t>(
     const Complex<int8_t>* __restrict__ volt,
@@ -320,90 +321,86 @@ __global__ void cross_correlation_kernel<2, int8_t>(
 
     for (unsigned int ch = 0; ch < n_channels_to_avg; ch++, ch_data += samples_in_frequency) {
 
-        const size_t A00 = base_a + 0u * n_integration_steps;
-        const size_t A01 = base_a + 1u * n_integration_steps;
-        const size_t B00 = base_b + 0u * n_integration_steps;
-        const size_t B01 = base_b + 1u * n_integration_steps;
+        // base indicies for each antenna (A and B) and each polarization (0 and 1)
+        const size_t base_A0 = base_a + 0u * n_integration_steps;
+        const size_t base_A1 = base_a + 1u * n_integration_steps;
+        const size_t base_B0 = base_b + 0u * n_integration_steps;
+        const size_t base_B1 = base_b + 1u * n_integration_steps;
 
         unsigned int step = 2u * lane_id;
-        int acc00_re = 0, acc00_im = 0;
-        int acc01_re = 0, acc01_im = 0;
-        int acc10_re = 0, acc10_im = 0;
-        int acc11_re = 0, acc11_im = 0;
 
+        // accumulators for each ant x pol combo
+        Complex<int> acc00{0, 0}; // for A0 x B0
+        Complex<int> acc01{0, 0}; // for A0 x B1
+        Complex<int> acc10{0, 0}; // for A1 x B0
+        Complex<int> acc11{0, 0}; // for A1 x B1
+
+        // each warp loads 2 x warpSize samples (2 x 16 x warpSize bits) at a time
         for (; step + 1 < n_integration_steps; step += 2u * warpSize) {
-            int A0 = load_32bits(&ch_data[A00 + step]);
-            int A1 = load_32bits(&ch_data[A01 + step]);
-            int B0 = load_32bits(&ch_data[B00 + step]);
-            int B1 = load_32bits(&ch_data[B01 + step]);
+            int A0 = load_32bits(&ch_data[base_A0 + step]);
+            int A1 = load_32bits(&ch_data[base_A1 + step]);
+            int B0 = load_32bits(&ch_data[base_B0 + step]);
+            int B1 = load_32bits(&ch_data[base_B1 + step]);
 
-            ccm_dp4a(A0, B0, acc00_re, acc00_im);
-            ccm_dp4a(A0, B1, acc01_re, acc01_im);
-            ccm_dp4a(A1, B0, acc10_re, acc10_im);
-            ccm_dp4a(A1, B1, acc11_re, acc11_im);
+            ccm_dp4a(A0, B0, acc00);
+            ccm_dp4a(A0, B1, acc01);
+            ccm_dp4a(A1, B0, acc10);
+            ccm_dp4a(A1, B1, acc11);
         }
 
         // get any remainder
         for (; step < n_integration_steps; step += 2u * warpSize) {
-            const auto &a0 = ch_data[A00 + step];
-            const auto &a1 = ch_data[A01 + step];
-            const auto &b0 = ch_data[B00 + step];
-            const auto &b1 = ch_data[B01 + step];
-            ccm(a0, b0, acc00_re, acc00_im);
-            ccm(a0, b1, acc01_re, acc01_im);
-            ccm(a1, b0, acc10_re, acc10_im);
-            ccm(a1, b1, acc11_re, acc11_im);
+            const auto &a0 = ch_data[base_A0 + step];
+            const auto &a1 = ch_data[base_A1 + step];
+            const auto &b0 = ch_data[base_B0 + step];
+            const auto &b1 = ch_data[base_B1 + step];
+            ccm(a0, b0, acc00);
+            ccm(a0, b1, acc01);
+            ccm(a1, b0, acc10);
+            ccm(a1, b1, acc11);
         }
 
-        float f00_re = (float)acc00_re, f00_im = (float)acc00_im;
-        float f01_re = (float)acc01_re, f01_im = (float)acc01_im;
-        float f10_re = (float)acc10_re, f10_im = (float)acc10_im;
-        float f11_re = (float)acc11_re, f11_im = (float)acc11_im;
+        Complex<float> f00 {(float)acc00.real, (float)acc00.imag};
+        Complex<float> f01 {(float)acc01.real, (float)acc01.imag};
+        Complex<float> f10 {(float)acc10.real, (float)acc10.imag};
+        Complex<float> f11 {(float)acc11.real, (float)acc11.imag};
 
-        // warp reduce helper
-        auto warp_sum = [&](float v) {
-            for (unsigned i = warpSize/2; i >= 1; i >>= 1) {
-                v += __gpu_shfl_down(v, i);
-            }
-            return v;
-        };
-
-        f00_re = warp_sum(f00_re); f00_im = warp_sum(f00_im);
-        f01_re = warp_sum(f01_re); f01_im = warp_sum(f01_im);
-        f10_re = warp_sum(f10_re); f10_im = warp_sum(f10_im);
-        f11_re = warp_sum(f11_re); f11_im = warp_sum(f11_im);
+        f00 = warp_sum(f00);
+        f01 = warp_sum(f01);
+        f10 = warp_sum(f10);
+        f11 = warp_sum(f11);
 
         if (lane_id == 0) {
-            size_t base = baseline * 4u;
+            size_t base = baseline * NPOL * NPOL;
             // 00
-            out_data[base + 0].real = fmaf(f00_re, norm, out_data[base + 0].real);
-            out_data[base + 0].imag = fmaf(f00_im, norm, out_data[base + 0].imag);
+            out_data[base + 0].real = fmaf(f00.real, norm, out_data[base + 0].real);
+            out_data[base + 0].imag = fmaf(f00.imag, norm, out_data[base + 0].imag);
             // 01
-            out_data[base + 1].real = fmaf(f01_re, norm, out_data[base + 1].real);
-            out_data[base + 1].imag = fmaf(f01_im, norm, out_data[base + 1].imag);
+            out_data[base + 1].real = fmaf(f01.real, norm, out_data[base + 1].real);
+            out_data[base + 1].imag = fmaf(f01.imag, norm, out_data[base + 1].imag);
             // 10
-            out_data[base + 2].real = fmaf(f10_re, norm, out_data[base + 2].real);
-            out_data[base + 2].imag = fmaf(f10_im, norm, out_data[base + 2].imag);
+            out_data[base + 2].real = fmaf(f10.real, norm, out_data[base + 2].real);
+            out_data[base + 2].imag = fmaf(f10.imag, norm, out_data[base + 2].imag);
             // 11
-            out_data[base + 3].real = fmaf(f11_re, norm, out_data[base + 3].real);
-            out_data[base + 3].imag = fmaf(f11_im, norm, out_data[base + 3].imag);
+            out_data[base + 3].real = fmaf(f11.real, norm, out_data[base + 3].real);
+            out_data[base + 3].imag = fmaf(f11.imag, norm, out_data[base + 3].imag);
         }
     }
 }
 
-Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int n_channels_to_avg){
+Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int n_channels_to_avg) {
     const ObservationInfo& obs_info {voltages.obsInfo};
 
     if(n_channels_to_avg < 1 || n_channels_to_avg > obs_info.nFrequencies) {
         std::stringstream ss;
-        ss << "number of channels to average (" << n_channels_to_avg
-           << ") is greater than the number of frequencies (" << obs_info.nFrequencies << ")";
+        ss << "number of channels to average (" << n_channels_to_avg << ")"
+           << " is greater than the number of frequencies (" << obs_info.nFrequencies << ")";
         throw std::invalid_argument(ss.str());
     }
     if(obs_info.nTimesteps % voltages.nIntegrationSteps != 0) {
         std::stringstream ss;
-        ss << "number of timesteps (" << obs_info.nTimesteps
-           << ") is not an integer multiple of the number of integration steps (" << voltages.nIntegrationSteps << ")";
+        ss << "number of timesteps (" << obs_info.nTimesteps << ")"
+           << " is not an integer multiple of the number of integration steps (" << voltages.nIntegrationSteps << ")";
         throw std::invalid_argument(ss.str());
     }
     if (!voltages.on_gpu() && !voltages.pinned()) {
@@ -411,8 +408,11 @@ Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int n_chan
                      "This will result in poor performance." << std::endl;
     }
 
-    if (obs_info.nPolarizations != 2) {
-        throw std::invalid_argument {"Expected 2 polarizations per antenna"};
+    if (obs_info.nPolarizations != N_POLARIZATIONS) {
+        std::stringstream ss;
+        ss << "expected " << N_POLARIZATIONS << " polarizations per antenna"
+           << " (found " << obs_info.nPolarizations << ")";
+        throw std::invalid_argument(ss.str());
     }
 
     // values to compute output size and indexing
@@ -462,6 +462,7 @@ Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int n_chan
 
     for (int i {0}; i < nIntervals; i++) {
         const gpuStream_t stream = streams[i % nStreams];
+
         if (!voltages.on_gpu()) {
             const size_t off = i*samplesInTimeInterval;
             const size_t count = samplesInTimeInterval;
@@ -473,6 +474,7 @@ Visibilities cross_correlation_gpu(const Voltages& voltages, unsigned int n_chan
                 stream
             );
         }
+
         cross_correlation_kernel<2><<<dim3(n_blocks), dim3(n_threads_per_block), 0, stream>>> (
             dev_voltages_data + i*samplesInTimeInterval,
             obs_info,
@@ -543,9 +545,11 @@ extern "C" int blink_cross_correlation_gpu(const float* voltages, float* visibil
     if(reset_buffer)
         gpuMemset(dev_xcorr, 0, sizeof(Complex<float>) * outSize);
 
-	const int nStreams {5};
+	const size_t nStreams = std::min(5ul, nIntervals);
+
     gpuStream_t *streams {new gpuStream_t[nStreams]};
-    for(int i {0}; i < nStreams; i++)
+
+    for(size_t i = 0; i < nStreams; i++)
         gpuStreamCreate(streams + i);
 
     // retrieve warp size (32 on NVIDIA, 64 on AMD MI250X)
@@ -557,7 +561,7 @@ extern "C" int blink_cross_correlation_gpu(const float* voltages, float* visibil
     const int n_blocks {(n_total_warps + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK};
 
     for(int i {0}; i < nIntervals; i++){
-        cross_correlation_kernel<2> <<< dim3(n_blocks), dim3(n_threads_per_block), 0, streams[i % nStreams] >>> (
+        cross_correlation_kernel<2> <<<dim3(n_blocks), dim3(n_threads_per_block), 0, streams[i % nStreams]>>> (
             reinterpret_cast<const Complex<float>*>(voltages) + i*samplesInTimeInterval, obsInfo, n_integrated_samples,
             n_channels_to_avg, dev_xcorr + i*nValuesInTimeInterval);
     }
