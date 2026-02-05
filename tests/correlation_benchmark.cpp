@@ -40,13 +40,41 @@ struct Options {
         return has_channels && has_itime && has_trials;
     }
 
-    void usage() {
-        std::cerr
-            << "Usage: ./correlation_benchmark"
-            << " -i <integration time>"
-            << " -t <trials>"
-            << " -c <channels>"
-            << " --no-check\n";
+    std::string usage() {
+        return "Usage: ./correlation_benchmark"
+            " -i <integration time>"
+            " -t <trials>"
+            " -c <channels>"
+            " --no-check";
+    }
+
+    static Options parse(int argc, char** argv) {
+        static option lopts[] = {
+            {"no-check", no_argument, nullptr, 0},
+            {nullptr, 0, nullptr, 0}
+        };
+
+        int arg;
+        int index = 0;
+
+        Options opt;
+
+        while ((arg = getopt_long(argc, argv, "i:t:c:", lopts, &index)) != -1) {
+            switch (arg) {
+                case 0:
+                    if (std::string(lopts[index].name) == "no-check") {
+                        opt.check = false;
+                    }
+                    break;
+                case 'i': opt.set_itime(optarg); break;
+                case 't': opt.set_trials(optarg); break;
+                case 'c': opt.set_channels(optarg); break;
+                default: throw std::invalid_argument{opt.usage()};
+            }
+        }
+
+        if (!opt.complete()) { throw std::invalid_argument{opt.usage()}; }
+        return opt;
     }
 private:
     bool has_trials = false;
@@ -54,33 +82,6 @@ private:
     bool has_itime = false;
 };
 
-
-int parse_options(int argc, char** argv, Options& opt) {
-    static option lopts[] = {
-        {"no-check", no_argument, nullptr, 0},
-        {nullptr, 0, nullptr, 0}
-    };
-
-    int arg;
-    int index = 0;
-
-    while ((arg = getopt_long(argc, argv, "i:t:c:", lopts, &index)) != -1) {
-        switch (arg) {
-            case 0:
-                if (std::string(lopts[index].name) == "no-check") {
-                    opt.check = false;
-                }
-                break;
-            case 'i': opt.set_itime(optarg); break;
-            case 't': opt.set_trials(optarg); break;
-            case 'c': opt.set_channels(optarg); break;
-            default: opt.usage(); return 1;
-        }
-    }
-
-    if (!opt.complete()) { opt.usage(); return 1; }
-    return 0;
-}
 
 template <typename T>
 int digits10(T value) {
@@ -246,12 +247,7 @@ void print_info(const Info& info) {
     }
 }
 
-Info correlate(
-    const Voltages& volt,
-    const Options& options,
-    bool check_correct
-) {
-
+Info correlate( const Voltages& volt, const Options& options) {
     std::vector<double> times;
     times.reserve(options.trials);
 
@@ -261,17 +257,22 @@ Info correlate(
         auto stop = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> elapsed = stop - start;
         times.push_back(elapsed.count());
-
-        if (i == options.trials - 1 && check_correct) {
-            xcorr_gpu.to_cpu();
-            auto xcorr = cross_correlation_cpu(volt, options.channels);
-            complex_arrays_equal(xcorr.data(), xcorr_gpu.data(), xcorr.size());
-        }
     }
 
     Info info(volt, std::move(times), options);
 
     return info;
+}
+
+bool check_correctness(const Voltages& volt, const Options& opt) {
+    auto xcorr_cpu = cross_correlation_cpu(volt, opt.channels);
+    auto xcorr_gpu = cross_correlation_gpu(volt, opt.channels);
+    xcorr_gpu.to_cpu();
+    return complex_arrays_equal(
+        xcorr_gpu.data(),
+        xcorr_cpu.data(),
+        xcorr_cpu.size()
+    );
 }
 
 std::string get_data_dir() {
@@ -286,7 +287,11 @@ std::string get_data_dir() {
 
 int main(int argc, char** argv) {
     Options options;
-    if (parse_options(argc, argv, options) != 0) {
+
+    try {
+        options = Options::parse(argc, argv);
+    } catch (std::invalid_argument& ex) {
+        std::cerr << ex.what() << std::endl;
         return 1;
     }
 
@@ -305,7 +310,14 @@ int main(int argc, char** argv) {
 
     auto volt = Voltages::from_dat_file(file, VCS_OBSERVATION_INFO, n_integ_steps);
 
-    auto info = correlate(volt, options, options.check);
+    if (options.check) {
+        std::cout << "Checking correctness..." << std::endl;
+        if (!check_correctness(volt, options)) {
+            return 1;
+        }
+    }
+
+    auto info = correlate(volt, options);
     print_info(info);
     std::cout << std::endl;
 }

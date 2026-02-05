@@ -25,7 +25,7 @@ if( NOT BLINK_ASTROIO_LIB )
 endif()
 
 
-file(GLOB correlation_sources 
+file(GLOB correlation_sources
     "src/correlation.cpp"
     "src/utils.cpp"
 )
@@ -73,10 +73,10 @@ if(USE_OPENMP)
     find_package(OpenMP REQUIRED)
     target_link_libraries(correlation OpenMP::OpenMP_CXX)
     target_link_libraries(blink-correlator OpenMP::OpenMP_CXX)
-    
+
 endif()
 
-# TESTS 
+# TESTS
 add_executable(correlation_test tests/correlation_test.cpp)
 target_link_libraries(correlation_test correlation)
 add_test(NAME correlation_test COMMAND correlation_test)
@@ -84,4 +84,7 @@ add_test(NAME correlation_test COMMAND correlation_test)
 add_executable(utils_test tests/utils_test.cpp)
 target_link_libraries(utils_test correlation)
 add_test(NAME utils_test COMMAND utils_test)
+
+add_executable(correlation_benchmark tests/correlation_benchmark.cpp)
+target_link_libraries(correlation_benchmark correlation)
 
