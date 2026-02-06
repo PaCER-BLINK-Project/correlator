@@ -16,8 +16,35 @@
 #define PARSE_BUFFER_SIZE 1024
 
 
+void read_data_from_file(std::string filename, char*& data, size_t& file_size) {
+    std::ifstream f(filename, std::ios::binary | std::ios::ate);
+    if(!f) {
+        std::cerr << "read_data_from_file: error opening file." << std::endl;
+        data = nullptr;
+        file_size = 0;
+        return;
+    }
 
-void read_data_from_file(std::string filename, char*& data, size_t& file_size){
+    // Get file size (we're at end due to ios::ate)
+    file_size = f.tellg();
+    f.seekg(0, std::ios::beg);  // Go back to beginning
+
+    // Allocate exact amount needed
+    data = new char[file_size];
+
+    // Read entire file in one go
+    f.read(data, file_size);
+
+    if(!f) {
+        std::cerr << "read_data_from_file: error reading file." << std::endl;
+        delete[] data;
+        data = nullptr;
+        file_size = 0;
+    }
+}
+
+
+void read_data_from_file_loop(std::string filename, char*& data, size_t& file_size){
     std::ifstream f;
     f.open(filename, std::ios::binary);
     if(!f){
