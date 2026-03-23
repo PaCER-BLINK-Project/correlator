@@ -74,14 +74,14 @@ __global__ void cross_correlation_kernel(const Complex<T> *volt, const Observati
                     ccm(currentChData[iA], currentChData[iB], accum);
                 }
                 // now integrate results in accum
-                for(unsigned int i {warpSize/2}; i >= 1; i >>=1) {
+                for(unsigned int i {warpSize/2u}; i >= 1; i >>=1) {
                     float up = __gpu_shfl_down(accum.real, i);
                     if(lane_id < i){
                         accum.real += up;
                     }
                 }
                     // now integrate results in accum
-                for(unsigned int i {warpSize/2}; i >= 1; i >>=1) {
+                for(unsigned int i {warpSize/2u}; i >= 1; i >>=1) {
                     float up = __gpu_shfl_down(accum.imag, i);
                     if(lane_id < i){
                         accum.imag += up;
